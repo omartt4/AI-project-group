@@ -39,8 +39,7 @@ flowchart LR
     UI --> SQLite
 ```
 
-The detailed implementation flow is documented in the
-[project plan](./project_plan.md).
+The detailed implementation flow is :
 
 <details>
 <summary>Detailed architecture diagram</summary>
