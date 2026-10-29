@@ -12,5 +12,10 @@ wheels/
 # Local environment variables
 .env
 
+# Local data & databases
+data/
+*.db
+
 # Local PDF corpus
 pdfs/
+
