@@ -66,6 +66,28 @@ html, body, [class*="css"] {
     border: 1px solid #581c87;
 }
 
+.badge-intent {
+    background: #422006;
+    color: #fde047;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    display: inline-block;
+    border: 1px solid #854d0e;
+}
+
+.badge-concept {
+    background: #042f2e;
+    color: #5eead4;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    display: inline-block;
+    border: 1px solid #115e59;
+}
+
 .badge-source-initial {
     background: #1e293b;
     color: #94a3b8;

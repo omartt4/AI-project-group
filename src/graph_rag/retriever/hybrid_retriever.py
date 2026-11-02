@@ -1,20 +1,37 @@
 """
-Hybrid Retriever module.
+Hybrid Retriever module for Adaptive Hybrid RAG with Diversity-Aware Retrieval.
 
 Combines:
-1. Dense Vector Retrieval (ChromaDB + nomic-embed-text)
-2. Knowledge Graph Traversal (Neo4j entity relations)
+1. Query Classification & Intent Routing
+2. Dynamic Top-K & Diversity-Aware Vector Retrieval (MMR over ChromaDB)
+3. Graph-based Concept Discovery (Neo4j multi-hop, bridge & hub exploration)
+4. Structured Evidence Aggregation
 
-Merges context into a unified, attributed context prompt for LLM answer generation.
+Maintains 100% backward compatibility with existing baseline retrieve() calls.
 """
 
-import re
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from graph_rag.embeddings.vector_store import vector_store
+from graph_rag.graph.concept_discovery import (
+    ConceptDiscoveryResult,
+    DiscoveredConcept,
+    concept_discovery_engine,
+)
 from graph_rag.graph.graph_queries import graph_queries
+from graph_rag.retriever.diversity_retriever import diversity_retriever
+from graph_rag.retriever.evidence_aggregator import (
+    AggregatedEvidence,
+    evidence_aggregator,
+)
+from graph_rag.retriever.query_classifier import (
+    QueryClassification,
+    QueryClass,
+    query_classifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,78 +43,128 @@ class RetrievedContext:
     graph_facts: List[Dict[str, Any]] = field(default_factory=list)
     assembled_text: str = ""
     sources: List[str] = field(default_factory=list)
+    classification: Optional[QueryClassification] = None
+    discovered_concepts: List[DiscoveredConcept] = field(default_factory=list)
+    unique_papers_count: int = 0
+    evidence: Optional[AggregatedEvidence] = None
 
 
 class HybridRetriever:
-    """Retrieves relevant passages and structured relations for a user query."""
+    """Adaptive Hybrid Retriever combining MMR Vector Search and Graph Concept Discovery."""
 
     def __init__(self) -> None:
         self.vector_db = vector_store
         self.graph_q = graph_queries
+        self.classifier = query_classifier
+        self.diversity_retriever = diversity_retriever
+        self.concept_engine = concept_discovery_engine
+        self.aggregator = evidence_aggregator
+
+    def adaptive_retrieve(
+        self,
+        query: str,
+        classification: Optional[QueryClassification] = None,
+    ) -> RetrievedContext:
+        """
+        Execute Adaptive Hybrid Retrieval with Diversity-Aware MMR and Graph Concept Discovery.
+        """
+        # 1. Classify Query Intent if not provided
+        qc = classification or self.classifier.classify(query)
+        logger.info(
+            "Adaptive Retrieval started: intent=%s, rec_k=%d, cand_pool=%d, mmr_lambda=%.2f",
+            qc.query_class.value,
+            qc.recommended_k,
+            qc.candidate_pool_size,
+            qc.mmr_lambda,
+        )
+
+        # Handle purely conversational queries fast
+        if qc.query_class == QueryClass.CONVERSATIONAL:
+            return RetrievedContext(
+                chunks=[],
+                graph_facts=[],
+                assembled_text="Conversational greeting/interaction.",
+                sources=[],
+                classification=qc,
+                discovered_concepts=[],
+                unique_papers_count=0,
+            )
+
+        # 2. Diversity-Aware Vector Retrieval (MMR)
+        diverse_chunks: List[Dict[str, Any]] = []
+        try:
+            diverse_chunks = self.diversity_retriever.retrieve_diverse(
+                query=query,
+                k=qc.recommended_k,
+                candidate_k=qc.candidate_pool_size,
+                mmr_lambda=qc.mmr_lambda,
+            )
+        except Exception as e:
+            logger.warning(f"Diversity vector retrieval failed: {e}. Falling back to baseline search.")
+            try:
+                diverse_chunks = self.vector_db.search(query=query, n_results=qc.recommended_k)
+            except Exception as e_base:
+                logger.error(f"Fallback vector search failed: {e_base}")
+
+        # 3. Graph-based Concept Discovery
+        discovery_res = ConceptDiscoveryResult()
+        try:
+            # Gather search keywords from extracted entities + query terms
+            search_keywords = list(qc.extracted_entities)
+            if not search_keywords:
+                search_keywords = [
+                    w for w in re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query)
+                    if w.lower() not in {"what", "when", "where", "which", "explain", "describe", "show", "tell", "paper", "research"}
+                ]
+
+            discovery_res = self.concept_engine.discover(
+                keywords=search_keywords,
+                comparison_targets=qc.comparison_targets,
+                max_depth=qc.graph_depth,
+                limit=qc.graph_limit,
+            )
+        except Exception as e:
+            logger.warning(f"Graph concept discovery failed: {e}")
+
+        # 4. Evidence Aggregation & Thematic Structuring
+        evidence = self.aggregator.aggregate(
+            diverse_chunks=diverse_chunks,
+            discovery=discovery_res,
+            classification=qc,
+        )
+
+        logger.info(
+            "Adaptive Retrieval completed: chunks=%d (unique papers=%d), concepts=%d, relations=%d",
+            len(diverse_chunks),
+            evidence.unique_papers_count,
+            len(discovery_res.concepts),
+            len(discovery_res.relationships),
+        )
+
+        return RetrievedContext(
+            chunks=diverse_chunks,
+            graph_facts=discovery_res.relationships,
+            assembled_text=evidence.assembled_context,
+            sources=evidence.sources,
+            classification=qc,
+            discovered_concepts=discovery_res.concepts,
+            unique_papers_count=evidence.unique_papers_count,
+            evidence=evidence,
+        )
 
     def retrieve(self, query: str, top_k: int = 5) -> RetrievedContext:
         """
-        Execute hybrid search across ChromaDB and Neo4j.
+        Baseline retrieval for backward compatibility.
+        Routes to adaptive retrieval with requested top_k as override if desired.
         """
-        # 1. Vector Search
-        chunks = []
-        try:
-            chunks = self.vector_db.search(query=query, n_results=top_k)
-        except Exception as e:
-            logger.warning("Vector retrieval failed: %s", e)
+        # Execute adaptive retrieval to maintain diversity and concept discovery benefits
+        qc = self.classifier.classify(query)
+        # Override top_k if explicitly specified by caller
+        if top_k != 5:
+            qc.recommended_k = top_k
+            qc.candidate_pool_size = max(top_k * 2, 12)
 
-        # 2. Graph Search
-        graph_facts = []
-        try:
-            # Extract keywords (> 3 chars, alphanumeric)
-            keywords = [w for w in re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query) if not w.lower() in {
-                "what", "when", "where", "which", "explain", "describe", "show", "tell", "paper", "research"
-            }]
-
-            for kw in keywords[:3]:
-                entities = self.graph_q.search_entities(keyword=kw, limit=3)
-                for ent in entities:
-                    subgraph = self.graph_q.find_entity_subgraph(ent["name"])
-                    graph_facts.extend(subgraph)
-        except Exception as e:
-            logger.warning("Graph retrieval failed: %s", e)
-
-        # 3. Assemble unified context with source attribution
-        context_parts = []
-        sources = set()
-
-        # Add graph facts if available
-        if graph_facts:
-            context_parts.append("### Structured Knowledge Graph Relationships:")
-            for fact in graph_facts[:8]:
-                src = fact.get("source", "")
-                rel = fact.get("relation", "")
-                tgt = fact.get("target", "")
-                context_parts.append(f"- ({src}) --[{rel}]--> ({tgt})")
-            context_parts.append("")
-
-        # Add text chunks
-        if chunks:
-            context_parts.append("### Relevant Research Excerpts:")
-            for idx, c in enumerate(chunks, start=1):
-                doc_name = c.get("metadata", {}).get("document_name", "Unknown Paper")
-                doc_title = c.get("metadata", {}).get("document_title", doc_name)
-                page = c.get("metadata", {}).get("page", 1)
-                text = c.get("text", "")
-                sources.add(f"{doc_title} (Page {page})")
-                context_parts.append(f"[{idx}] Source: {doc_title} (File: {doc_name}, Page {page}):\n{text}\n")
-        else:
-            if not graph_facts:
-                context_parts.append("No specific documents matched the query in the knowledge base.")
-
-        assembled_text = "\n".join(context_parts)
-
-        return RetrievedContext(
-            chunks=chunks,
-            graph_facts=graph_facts,
-            assembled_text=assembled_text,
-            sources=sorted(list(sources)),
-        )
+        return self.adaptive_retrieve(query, classification=qc)
 
 
 hybrid_retriever = HybridRetriever()

@@ -6,7 +6,13 @@
 
 ## 🌟 Key Features
 
-- **Hybrid Retrieval (Graph + Vector)**: Traverses structured entity relationships in **Neo4j** while simultaneously performing dense semantic similarity search in **ChromaDB**.
+- **Adaptive Hybrid RAG with Diversity-Aware Retrieval**:
+  - **Query Classification & Intent Routing**: Categorizes queries (`FACTUAL_LOOKUP`, `COMPARATIVE`, `MULTI_HOP_RELATIONAL`, `EXPLORATORY_THEMATIC`, `SUMMARIZATION`, `CONVERSATIONAL`) to dynamically adapt retrieval strategies.
+  - **Dynamic Top-K**: Automatically budgets candidate pool and final chunk counts based on question complexity.
+  - **Diversity-Aware MMR (Maximal Marginal Relevance)**: Eliminates redundant passages across candidate embeddings while enforcing cross-document coverage across distinct papers.
+  - **Graph-Based Concept Discovery**: Traverses **Neo4j** for multi-hop entity neighborhoods, bridge concepts between comparative targets, and central thematic hubs.
+  - **Structured Evidence Aggregation**: Fuses MMR vector excerpts, graph pathways, and cross-references into an attributed context payload.
+  - **Adaptive LLM Synthesis**: Tailors **Ollama** prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
 - **100% Local & Privacy-Preserving**: Runs locally via **Ollama** (`qwen2.5` for generation/entity extraction, `nomic-embed-text` for embeddings). No API keys or external data transmission.
 - **Dual Data Sources**:
   1. **Initial Repository**: 93 research papers pre-loaded in the `pdfs/` folder.
@@ -313,7 +319,9 @@ graph-rag/
 ├── scripts/
 │   ├── setup_db.py               # Initializes SQLite tables
 │   ├── ingest.py                 # CLI batch ingestion for pdfs/ folder
-│   └── test_dedup.py             # Deduplication verification test
+│   ├── test_dedup.py             # Deduplication verification test
+│   ├── test_adaptive_rag.py      # Adaptive Hybrid RAG & MMR test suite
+│   └── test_query_engine.py      # End-to-end query engine validation
 │
 └── src/graph_rag/
     ├── config.py                 # Loads and validates .env settings
@@ -347,14 +355,18 @@ graph-rag/
     ├── graph/
     │   ├── entity_extractor.py   # qwen2.5 entity/relationship extraction
     │   ├── graph_builder.py      # Neo4j driver & node/edge creator
-    │   └── graph_queries.py      # Cypher multi-hop query helpers
+    │   ├── graph_queries.py      # Cypher multi-hop query helpers
+    │   └── concept_discovery.py  # Concept neighborhood, bridge & hub engine
     │
     ├── llm/
     │   └── ollama_client.py      # Ollama API client wrapper
     │
     ├── retriever/
-    │   ├── hybrid_retriever.py   # Combines ChromaDB and Neo4j context
-    │   └── query_engine.py       # Coordinates retrieval, generation & eval
+    │   ├── query_classifier.py   # Query classification & dynamic parameters
+    │   ├── diversity_retriever.py# Vectorized MMR & cross-document coverage
+    │   ├── evidence_aggregator.py# Vector-Graph fusion & structured context
+    │   ├── hybrid_retriever.py   # Adaptive Hybrid Retriever orchestrator
+    │   └── query_engine.py       # Intent-specific LLM synthesis & live eval
     │
     ├── evaluation/
     │   ├── metrics.py            # LLM-as-a-Judge evaluators

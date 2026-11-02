@@ -105,20 +105,43 @@ def render_chat_page() -> None:
 
                 st.markdown(resp.answer)
 
-                if resp.sources:
-                    with st.expander(f"📚 View {len(resp.sources)} Source Citations", expanded=False):
+                if resp.sources or resp.discovered_concepts_count:
+                    exp_title = f"📚 View {len(resp.sources)} Sources across {resp.unique_papers_count} Papers"
+                    if resp.discovered_concepts_count:
+                        exp_title += f" & {resp.discovered_concepts_count} Discovered Concepts"
+                    with st.expander(exp_title, expanded=False):
+                        if resp.concept_summary:
+                            st.markdown(f"**🧠 Discovered Graph Concepts:** `{resp.concept_summary}`")
+                            st.divider()
                         for s in resp.sources:
                             st.markdown(f"- {s}")
 
-                # Inline evaluation scores
+                # Inline adaptive telemetry and evaluation scores
+                badges_cols = st.columns([1.5, 1.2, 1.2, 1.2, 1.2])
+                col_idx = 0
+                if resp.classification:
+                    with badges_cols[col_idx]:
+                        st.markdown(
+                            f"<span class='badge-intent'>🎯 {resp.classification.query_class.value} (K={resp.classification.recommended_k})</span>",
+                            unsafe_allow_html=True,
+                        )
+                    col_idx += 1
+                if resp.discovered_concepts_count:
+                    with badges_cols[col_idx]:
+                        st.markdown(
+                            f"<span class='badge-concept'>🧠 {resp.discovered_concepts_count} Concepts</span>",
+                            unsafe_allow_html=True,
+                        )
+                    col_idx += 1
                 if resp.evaluation:
-                    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 3])
-                    with c1:
+                    with badges_cols[col_idx]:
                         st.markdown(f"<span class='badge-faith'>✅ Grounding: {int(resp.evaluation.faithfulness * 100)}%</span>", unsafe_allow_html=True)
-                    with c2:
+                    col_idx += 1
+                    with badges_cols[col_idx]:
                         st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {int(resp.evaluation.answer_relevance * 100)}%</span>", unsafe_allow_html=True)
-                    with c3:
-                        st.markdown(f"<span class='badge-latency'>⏱️ {resp.latency.total_ms}ms</span>", unsafe_allow_html=True)
+                    col_idx += 1
+                with badges_cols[min(col_idx, 4)]:
+                    st.markdown(f"<span class='badge-latency'>⏱️ {resp.latency.total_ms}ms</span>", unsafe_allow_html=True)
 
                 # 3. Save assistant response into database
                 chat_service.add_message(
