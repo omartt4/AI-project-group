@@ -27,9 +27,13 @@ class OllamaClient:
         embed_model: Optional[str] = None,
     ) -> None:
         self.base_url = base_url or settings.OLLAMA_BASE_URL
-        self.llm_model = llm_model or settings.OLLAMA_LLM_MODEL
+        self.llm_model = llm_model or settings.OLLAMA_MODEL
         self.embed_model = embed_model or settings.OLLAMA_EMBED_MODEL
-        self.client = ollama.Client(host=self.base_url, timeout=60.0)
+        self.client = ollama.Client(
+            host=self.base_url,
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        )
+        self.keep_alive = settings.OLLAMA_KEEP_ALIVE
 
     def is_available(self) -> bool:
         """Check if Ollama server is running and accessible."""
@@ -50,13 +54,27 @@ class OllamaClient:
             logger.warning(f"Failed to query Ollama models: {e}")
             return []
 
+    def missing_models(self, required_models: List[str]) -> List[str]:
+        """Return configured models that are not installed locally."""
+        def normalized_name(model: str) -> str:
+            name, separator, tag = model.partition(":")
+            return f"{name}:{tag if separator else 'latest'}"
+
+        installed = {normalized_name(model) for model in self.list_models()}
+        return [
+            model
+            for model in required_models
+            if normalized_name(model) not in installed
+        ]
+
     def generate(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.2,
+        max_retries: Optional[int] = None,
     ) -> str:
-        """Generate a text response using Ollama LLM with automatic model fallback."""
+        """Generate a text response using Ollama LLM with automatic model fallback and retry logic."""
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -64,37 +82,75 @@ class OllamaClient:
 
         # Try configured model, fallback to any available qwen or local model
         target_model = self.llm_model
-        try:
-            response = self.client.chat(
-                model=target_model,
-                messages=messages,
-                options={"temperature": temperature},
-            )
-            return response["message"]["content"].strip()
-        except Exception as e:
-            # Check if 404 not found and attempt fallback
-            err_str = str(e).lower()
-            if "not found" in err_str:
-                available = self.list_models()
-                fallback = next((m for m in available if "qwen" in m.lower() or "deepseek" in m.lower()), None)
-                if fallback and fallback != target_model:
-                    logger.info(f"Model '{target_model}' not found, falling back to installed '{fallback}'")
-                    self.llm_model = fallback
-                    response = self.client.chat(
-                        model=fallback,
-                        messages=messages,
-                        options={"temperature": temperature},
-                    )
-                    return response["message"]["content"].strip()
-            raise
+        max_retries = max_retries if max_retries is not None else settings.OLLAMA_MAX_RETRIES
+        
+        # Initial options
+        num_ctx = settings.OLLAMA_NUM_CTX
+        num_predict = settings.OLLAMA_NUM_PREDICT
+        
+        for attempt in range(max_retries + 1):
+            options = {
+                "temperature": temperature,
+                "num_gpu": settings.OLLAMA_NUM_GPU,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
+            }
+            
+            try:
+                response = self.client.chat(
+                    model=target_model,
+                    messages=messages,
+                    options=options,
+                    keep_alive=self.keep_alive,
+                )
+                return response["message"]["content"].strip()
+            except Exception as e:
+                err_str = str(e).lower()
+                # Check if 404 not found and attempt fallback
+                if "not found" in err_str and attempt == 0:
+                    available = self.list_models()
+                    fallback = next((m for m in available if "qwen" in m.lower() or "deepseek" in m.lower()), None)
+                    if fallback and fallback != target_model:
+                        logger.info(f"Model '{target_model}' not found, falling back to installed '{fallback}'")
+                        self.llm_model = fallback
+                        target_model = fallback
+                        continue
+                    raise RuntimeError(
+                        f"Ollama model not found: '{target_model}'. "
+                        f"Install it with `ollama pull {target_model}`."
+                    ) from e
+                
+                # Retry on timeout - halve context and output limits
+                if "timeout" in err_str or "timed out" in err_str:
+                    if attempt < max_retries:
+                        logger.warning(f"Ollama request timed out (attempt {attempt + 1}/{max_retries + 1}), retrying with reduced context...")
+                        num_ctx = num_ctx // 2
+                        num_predict = num_predict // 2
+                        logger.info(f"Reduced num_ctx to {num_ctx}, num_predict to {num_predict}")
+                        continue
+                    else:
+                        logger.error(f"Ollama request failed after {max_retries + 1} attempts: {e}")
+                        raise RuntimeError(f"Ollama request failed: timed out") from e
+                
+                # Other errors
+                raise
 
     def get_embedding(self, text: str) -> List[float]:
         """Generate embedding vector for a single text chunk."""
         # Use nomic-embed-text
-        res = self.client.embeddings(
-            model=self.embed_model,
-            prompt=text,
-        )
+        try:
+            res = self.client.embeddings(
+                model=self.embed_model,
+                prompt=text,
+                options={"num_gpu": settings.OLLAMA_NUM_GPU},
+            )
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise RuntimeError(
+                    f"Ollama model not found: '{self.embed_model}'. "
+                    f"Install it with `ollama pull {self.embed_model}`."
+                ) from e
+            raise
         return res["embedding"]
 
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
@@ -104,7 +160,19 @@ class OllamaClient:
 
         # Ollama's embed endpoint accepts the complete batch in one request.
         # This avoids paying model-loading and HTTP overhead once per chunk.
-        response = self.client.embed(model=self.embed_model, input=texts)
+        try:
+            response = self.client.embed(
+                model=self.embed_model,
+                input=texts,
+                options={"num_gpu": settings.OLLAMA_NUM_GPU},
+            )
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise RuntimeError(
+                    f"Ollama model not found: '{self.embed_model}'. "
+                    f"Install it with `ollama pull {self.embed_model}`."
+                ) from e
+            raise
         return [list(embedding) for embedding in response.embeddings]
 
 

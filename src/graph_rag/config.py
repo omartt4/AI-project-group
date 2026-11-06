@@ -18,19 +18,48 @@ ENV_FILE = PROJECT_ROOT / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
 
-@dataclass(frozen=True)
+def normalize_neo4j_uri(uri: str) -> str:
+    """
+    Normalize Neo4j URI for Aura instances.
+    Converts neo4j+s:// to neo4j+ssc:// to skip strict certificate verification.
+    This is needed for Neo4j Aura instances behind SSL inspection/proxy/antivirus.
+    """
+    if uri.startswith("neo4j+s://"):
+        return uri.replace("neo4j+s://", "neo4j+ssc://")
+    elif uri.startswith("neo4j://"):
+        return uri.replace("neo4j://", "neo4j+ssc://")
+    return uri
+
+
+@dataclass
 class Settings:
     """Application configuration settings."""
 
     # ── Ollama Settings ──
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:7b"))
+    OLLAMA_LLM_MODEL: str = OLLAMA_MODEL  # Alias for backward compatibility
     OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+    OLLAMA_NUM_GPU: int = int(os.getenv("OLLAMA_NUM_GPU", "0"))
+    OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+    OLLAMA_NUM_CTX: int = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+    OLLAMA_NUM_PREDICT: int = int(os.getenv("OLLAMA_NUM_PREDICT", "256"))
+    OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "60m")
+    OLLAMA_MAX_RETRIES: int = int(os.getenv("OLLAMA_MAX_RETRIES", "1"))
+
+    # ── LLM Backend Selection ──
+    LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama")  # "ollama" or "anthropic"
 
     # ── Neo4j Settings ──
     NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password123")
+    NEO4J_TIMEOUT_SECONDS: int = int(os.getenv("NEO4J_TIMEOUT_SECONDS", "5"))
+    USE_GRAPH: bool = os.getenv("USE_GRAPH", "true").lower() in ("true", "1", "yes")
+
+    def __post_init__(self):
+        """Normalize Neo4j URI after initialization."""
+        self.NEO4J_URI = normalize_neo4j_uri(self.NEO4J_URI)
 
     # ── Paths & Storage ──
     PDF_DIR: Path = PROJECT_ROOT / os.getenv("PDF_DIR", "pdfs")
@@ -44,6 +73,10 @@ class Settings:
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "150"))
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
+
+    # ── Context Limits for LLM ──
+    MAX_CONTEXT_CHUNKS: int = int(os.getenv("MAX_CONTEXT_CHUNKS", "3"))
+    MAX_CONTEXT_CHARS: int = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
 
     # ── JWT Authentication ──
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "dev-secret-key-graph-rag-2026-super-secure")

@@ -1,0 +1,578 @@
+[
+  {
+    "id": "q01",
+    "type": "specific",
+    "question": "Why do traditional topic models perform poorly on short texts?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "spars",
+      "co-occurrence"
+    ],
+    "reference": "Short texts are sparse and lack word co-occurrence information."
+  },
+  {
+    "id": "q02",
+    "type": "specific",
+    "question": "Which method is given as an example of the global word co-occurrence based family?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "BTM"
+    ],
+    "reference": "BTM is the example of the global word co-occurrence based family."
+  },
+  {
+    "id": "q03",
+    "type": "specific",
+    "question": "Which methods are given as examples of the self-aggregation based family?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "SATM",
+      "PTM"
+    ],
+    "reference": "SATM and PTM."
+  },
+  {
+    "id": "q04",
+    "type": "specific",
+    "question": "In which programming language is the STTM library written?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "Java"
+    ],
+    "reference": "STTM is a Java library."
+  },
+  {
+    "id": "q05",
+    "type": "specific",
+    "question": "Why is scarce labeled data a concern for the neural document expansion approach?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval"
+    ],
+    "keywords": [
+      "scarce"
+    ],
+    "reference": "In standard ad-hoc IR labeled data is scarce and documents are long; the paper adapts the Seq2Seq expansion approach to this setting."
+  },
+  {
+    "id": "q06",
+    "type": "specific",
+    "question": "How does adding generated terms to documents help retrieval?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval"
+    ],
+    "keywords": [
+      "vocabulary",
+      "mismatch"
+    ],
+    "reference": "The generated terms reduce the vocabulary mismatch between queries and documents."
+  },
+  {
+    "id": "q07",
+    "type": "specific",
+    "question": "Which type of retrieval task does the neural document expansion paper address?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval"
+    ],
+    "keywords": [
+      "ad-hoc"
+    ],
+    "reference": "Ad-hoc information retrieval."
+  },
+  {
+    "id": "q08",
+    "type": "specific",
+    "question": "How is hashtag segmentation formulated as a learning problem?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "pairwise",
+      "ranking"
+    ],
+    "reference": "As pairwise ranking of candidate segmentations with a neural model."
+  },
+  {
+    "id": "q09",
+    "type": "specific",
+    "question": "What does the hashtag segmentation model rank?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "candidate",
+      "segment"
+    ],
+    "reference": "Candidate segmentations of a hashtag."
+  },
+  {
+    "id": "q10",
+    "type": "specific",
+    "question": "Is the hashtag segmentation model trained on a single task or on several tasks?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "multi-task"
+    ],
+    "reference": "It is trained multi-task (it also handles single-token vs multi-token hashtags)."
+  },
+  {
+    "id": "q11",
+    "type": "specific",
+    "question": "Who developed the adaptive cycle concept discussed in the Panarchy paper?",
+    "expected_papers": [
+      "Panarchy: ripples of a boundary concept"
+    ],
+    "keywords": [
+      "Holling"
+    ],
+    "reference": "The adaptive cycle is attributed to Holling."
+  },
+  {
+    "id": "q12",
+    "type": "specific",
+    "question": "What do the nested hierarchies in the Panarchy paper link together?",
+    "expected_papers": [
+      "Panarchy: ripples of a boundary concept"
+    ],
+    "keywords": [
+      "adaptive",
+      "scale"
+    ],
+    "reference": "They link adaptive cycles across different scales."
+  },
+  {
+    "id": "q13",
+    "type": "specific",
+    "question": "How are reviews annotated in the inclusion and exclusion phrase mining paper?",
+    "expected_papers": [
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "BIO",
+      "manual"
+    ],
+    "reference": "Reviews are manually annotated with BIO tags."
+  },
+  {
+    "id": "q14",
+    "type": "specific",
+    "question": "How is phrase extraction formulated in the inclusion and exclusion phrase mining paper?",
+    "expected_papers": [
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "sequence"
+    ],
+    "reference": "As a sequence labeling task over review text."
+  },
+  {
+    "id": "q15",
+    "type": "specific",
+    "question": "Which neural taggers are evaluated in the inclusion and exclusion phrase mining paper?",
+    "expected_papers": [
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "BiLSTM",
+      "BERT"
+    ],
+    "reference": "BiLSTM-CRF and BERT-based taggers (plus a CRF)."
+  },
+  {
+    "id": "q16",
+    "type": "multi",
+    "question": "Compare the short text topic modeling survey and the inclusion and exclusion phrase mining paper: what does each cover?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "topic",
+      "BIO"
+    ],
+    "reference": "The survey covers topic model families for short texts and the STTM library; the phrase mining paper tags inclusion/exclusion phrases in reviews with BIO sequence labeling. Keep the content separate."
+  },
+  {
+    "id": "q17",
+    "type": "multi",
+    "question": "Compare the neural document expansion paper and the hashtag segmentation paper: which neural approach does each use?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "Seq2Seq",
+      "pairwise"
+    ],
+    "reference": "Document expansion uses a Seq2Seq model to generate extra terms; hashtag segmentation uses a multi-task pairwise neural ranking model."
+  },
+  {
+    "id": "q18",
+    "type": "multi",
+    "question": "Contrast the neural document expansion paper with the Panarchy paper: what field and problem does each address?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Panarchy: ripples of a boundary concept"
+    ],
+    "keywords": [
+      "retrieval",
+      "adaptive"
+    ],
+    "reference": "Document expansion is information retrieval (vocabulary mismatch); Panarchy is resilience theory (adaptive cycles, nested scales). Content must not be mixed."
+  },
+  {
+    "id": "q19",
+    "type": "multi",
+    "question": "Compare the neural document expansion paper and the phrase mining paper: which task and which models does each use?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "Seq2Seq",
+      "BIO"
+    ],
+    "reference": "Document expansion: Seq2Seq term generation for ad-hoc retrieval. Phrase mining: BIO sequence labeling with CRF, BiLSTM-CRF and BERT-based taggers."
+  },
+  {
+    "id": "q20",
+    "type": "multi",
+    "question": "Contrast the hashtag segmentation paper with the Panarchy paper: what is each about?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Panarchy: ripples of a boundary concept"
+    ],
+    "keywords": [
+      "pairwise",
+      "adaptive"
+    ],
+    "reference": "Hashtag segmentation: pairwise neural ranking of candidate segmentations. Panarchy: adaptive cycles and nested hierarchies. Different fields."
+  },
+  {
+    "id": "q21",
+    "type": "multi",
+    "question": "Contrast the Panarchy paper with the phrase mining paper: what is each about and which methods does each use?",
+    "expected_papers": [
+      "Panarchy: ripples of a boundary concept",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "adaptive",
+      "BIO"
+    ],
+    "reference": "Panarchy: conceptual framework of adaptive cycles (potential, connectivity, resilience). Phrase mining: BIO-tagged sequence labeling models."
+  },
+  {
+    "id": "q22",
+    "type": "multi",
+    "question": "Compare the short text topic modeling survey and the neural document expansion paper in a table: problem, approach, and what each paper contributes.",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval"
+    ],
+    "keywords": [
+      "spars",
+      "Seq2Seq"
+    ],
+    "reference": "Survey: sparsity in short texts, three families of topic models, STTM library. Document expansion: vocabulary mismatch, Seq2Seq term generation."
+  },
+  {
+    "id": "q23",
+    "type": "multi",
+    "question": "Give a one-line summary of each of these three papers: the short text topic modeling survey, neural document expansion, and hashtag segmentation.",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "reference": "One correct line per paper, no mixing of contributions."
+  },
+  {
+    "id": "q24",
+    "type": "multi",
+    "question": "Give a one-line summary of each of these three papers: neural document expansion, Panarchy, and inclusion and exclusion phrase mining.",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Panarchy: ripples of a boundary concept",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "reference": "One correct line per paper, no mixing of contributions."
+  },
+  {
+    "id": "q25",
+    "type": "multi",
+    "question": "Build a table of all five papers in the library with columns: field, task or topic, and main method.",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Panarchy: ripples of a boundary concept",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "reference": "Five rows, one per paper, each with the correct field/task/method.",
+    "note": "Hard test: 5 papers, but retrieval keeps at most 8 chunks and 2 per paper."
+  },
+  {
+    "id": "q26",
+    "type": "multi",
+    "question": "Which of the five papers belong to NLP or information retrieval and which one does not?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Panarchy: ripples of a boundary concept",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "Panarchy"
+    ],
+    "reference": "Panarchy is the non-NLP paper (resilience theory); the other four are NLP/IR.",
+    "note": "Hard test: 5 papers."
+  },
+  {
+    "id": "q27",
+    "type": "multi",
+    "question": "Which papers formulate their task as sequence generation or sequence labeling?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "Seq2Seq",
+      "BIO"
+    ],
+    "reference": "Document expansion uses a Seq2Seq generator; phrase mining uses BIO sequence labeling."
+  },
+  {
+    "id": "q28",
+    "type": "multi",
+    "question": "Which papers in the library use neural models, and for what?",
+    "expected_papers": [
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "Seq2Seq",
+      "pairwise"
+    ],
+    "reference": "Document expansion (Seq2Seq), hashtag segmentation (pairwise neural ranking), phrase mining (BiLSTM-CRF, BERT taggers)."
+  },
+  {
+    "id": "q29",
+    "type": "multi",
+    "question": "Which papers work with short, user-generated or social-media style text?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews",
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "hashtag",
+      "review"
+    ],
+    "reference": "Hashtag segmentation (hashtags), phrase mining (reviews), and the short text survey (short texts)."
+  },
+  {
+    "id": "q30",
+    "type": "multi",
+    "question": "Which paper reports a 24.6% error reduction, and does the short text topic modeling survey report the same figure?",
+    "expected_papers": [
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey"
+    ],
+    "keywords": [
+      "24.6"
+    ],
+    "reference": "The hashtag segmentation paper reports 24.6% over the previous state of the art; the figure must not be attributed to the survey."
+  },
+  {
+    "id": "q31",
+    "type": "multi",
+    "question": "Does the inclusion and exclusion phrase mining paper use pairwise ranking?",
+    "expected_papers": [
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "BIO"
+    ],
+    "reference": "No. Pairwise ranking belongs to the hashtag segmentation paper; the phrase mining paper uses BIO sequence labeling."
+  },
+  {
+    "id": "q32",
+    "type": "multi",
+    "question": "Which paper uses BIO tags and which one uses pairwise ranking?",
+    "expected_papers": [
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "keywords": [
+      "BIO",
+      "pairwise"
+    ],
+    "reference": "Phrase mining uses BIO tags; hashtag segmentation uses pairwise ranking."
+  },
+  {
+    "id": "q33",
+    "type": "multi",
+    "question": "List the main methods or models named in each of the five papers.",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Panarchy: ripples of a boundary concept",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "DMM",
+      "Seq2Seq",
+      "pairwise",
+      "CRF"
+    ],
+    "reference": "Survey: DMM, BTM, SATM, PTM, STTM. Doc expansion: Seq2Seq. Hashtag: pairwise ranking, multi-task. Panarchy: adaptive cycle. Phrase mining: CRF, BiLSTM-CRF, BERT.",
+    "note": "Hard test: 5 papers."
+  },
+  {
+    "id": "q34",
+    "type": "multi",
+    "question": "Which other papers in the library are most closely related to the hashtag segmentation paper, and why?",
+    "reference": "Check by hand against the edges table.",
+    "require_citation": false,
+    "note": "Graph-sensitive."
+  },
+  {
+    "id": "q35",
+    "type": "multi",
+    "question": "Which other papers in the library are most closely related to the neural document expansion paper, and why?",
+    "reference": "Check by hand against the edges table.",
+    "require_citation": false,
+    "note": "Graph-sensitive."
+  },
+  {
+    "id": "q36",
+    "type": "multi",
+    "question": "Which other papers in the library are most closely related to the Panarchy paper, and why?",
+    "reference": "Expected: none are closely related; the answer should say so instead of inventing links.",
+    "require_citation": false,
+    "note": "Graph-sensitive. Panarchy is from a different field."
+  },
+  {
+    "id": "q37",
+    "type": "multi",
+    "question": "Which other papers in the library are most closely related to the inclusion and exclusion phrase mining paper, and why?",
+    "reference": "Check by hand against the edges table.",
+    "require_citation": false,
+    "note": "Graph-sensitive."
+  },
+  {
+    "id": "q38",
+    "type": "multi",
+    "question": "What challenge related to limited text information is shared by the short text survey, the neural document expansion paper, and the hashtag segmentation paper?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation"
+    ],
+    "reference": "Survey: sparsity/missing co-occurrence in short texts; document expansion: vocabulary mismatch; hashtag: short noisy hashtags. Attribute each claim to the right paper."
+  },
+  {
+    "id": "q39",
+    "type": "multi",
+    "question": "How could ideas from the short text topic modeling survey and the neural document expansion paper be combined? Say which idea comes from which paper.",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Neural document expansion for ad-hoc information retrieval"
+    ],
+    "keywords": [
+      "aggregat",
+      "Seq2Seq"
+    ],
+    "reference": "Survey: aggregation and co-occurrence ideas for sparse text; document expansion: Seq2Seq term generation. Answer must keep the sources separate and not claim the papers combine them."
+  },
+  {
+    "id": "q40",
+    "type": "multi",
+    "question": "Which paper provides a software library, and which papers propose a new model?",
+    "expected_papers": [
+      "Short Text Topic Modeling Techniques, Applications, and Performance: A Survey",
+      "Multi-task Pairwise Neural Ranking for Hashtag Segmentation",
+      "Neural document expansion for ad-hoc information retrieval",
+      "Should I visit this place? Inclusion and Exclusion Phrase Mining from Reviews"
+    ],
+    "keywords": [
+      "STTM",
+      "Java"
+    ],
+    "reference": "The survey provides the Java STTM library; hashtag segmentation, document expansion and phrase mining present models/approaches."
+  },
+  {
+    "id": "q41",
+    "type": "unanswerable",
+    "question": "What does the Panarchy paper say about neural network architectures?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q42",
+    "type": "unanswerable",
+    "question": "Which paper in the library proposes a graph neural network for molecule property prediction?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q43",
+    "type": "unanswerable",
+    "question": "What BLEU score does the phrase mining paper report for machine translation?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q44",
+    "type": "unanswerable",
+    "question": "Which paper in the library studies autonomous driving perception?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q45",
+    "type": "unanswerable",
+    "question": "What does the neural document expansion paper conclude about speech recognition?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q46",
+    "type": "unanswerable",
+    "question": "Which paper in the library uses a GAN to generate face images?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q47",
+    "type": "unanswerable",
+    "question": "What does the hashtag segmentation paper say about genome sequencing?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q48",
+    "type": "unanswerable",
+    "question": "What medication dosage is recommended in any paper in the library?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q49",
+    "type": "unanswerable",
+    "question": "Which paper in the library describes a movie recommender based on collaborative filtering?",
+    "note": "Verify that no paper in the library covers this."
+  },
+  {
+    "id": "q50",
+    "type": "unanswerable",
+    "question": "How does the phrase mining paper process audio recordings?",
+    "note": "Verify that no paper in the library covers this."
+  }
+]
