@@ -196,22 +196,27 @@ flowchart TD
     D --> F
     E --> F
 
-    F --> G[Chunk extraction results]
-    G --> H[Paper-wide aggregation]
-    H --> I[Deduplicate entities]
-    H --> J[Deduplicate relationships]
-    I --> K[Validated graph result]
-    J --> K
+    F --> G[Entities: name, category, description]
+    F --> H[Relationships: source, target, type, description]
+    G --> I[Paper-wide entity aggregation]
+    H --> J[Paper-wide relationship aggregation]
+    I --> K[Deduplicate by normalized name + category]
+    J --> L[Deduplicate by source + target + type]
+    K --> M[Validated entities]
+    L --> N[Validated relationships]
+    M --> O[Ensure relationship endpoints exist]
+    N --> O
 
-    K --> L[Neo4j graph builder]
-    L --> M[Document node]
-    L --> N[Entity nodes]
-    L --> O[MENTIONS edges]
-    L --> P[Semantic relationship edges]
+    O --> P[Neo4j graph builder]
+    P --> Q[MERGE Document node]
+    P --> R[MERGE Entity nodes]
+    Q --> S[CREATE MENTIONS edges]
+    R --> S
+    O --> T[CREATE semantic edges]
 
-    F -. timeout .-> Q[Retry up to 2 times]
-    Q -. retries exhausted .-> R[Rule-based fallback]
-    R --> G
+    F -. timeout .-> V[Retry up to 2 times]
+    V -. retries exhausted .-> U[Rule-based fallback]
+    U --> G
 ```
 
 ### Component responsibilities
@@ -225,6 +230,50 @@ flowchart TD
 | Relationship deduplication | Merges relationships by source, target, and type |
 | Neo4j graph builder | Writes the final nodes and relationships |
 | Rule-based fallback | Keeps graph extraction running after repeated LLM timeouts |
+
+### What the LLM creates
+
+For each chunk, the LLM returns two collections:
+
+```json
+{
+  "entities": [
+    {
+      "name": "BERT",
+      "category": "Method",
+      "description": "Transformer-based language model"
+    }
+  ],
+  "relations": [
+    {
+      "source": "BERT",
+      "target": "SQuAD",
+      "relation_type": "EVALUATES_ON",
+      "description": "BERT is evaluated on SQuAD"
+    }
+  ]
+}
+```
+
+The entity becomes an `Entity` node in Neo4j. The relation becomes a typed
+relationship between two `Entity` nodes:
+
+```cypher
+(:Entity {name: "BERT", category: "Method"})
+  -[:EVALUATES_ON]->
+(:Entity {name: "SQuAD", category: "Dataset"})
+```
+
+The paper itself is stored as a `Document` node, and every extracted entity is
+connected to it:
+
+```cypher
+(:Document)-[:MENTIONS]->(:Entity)
+```
+
+The LLM determines relationship types from the meaning of the text. For
+example, a sentence stating that a method is tested on a benchmark can produce
+`EVALUATES_ON`; a sentence describing a new technique can produce `PROPOSES`.
 
 To rebuild the graph for already-ingested papers without duplicating vector
 embeddings, run:
