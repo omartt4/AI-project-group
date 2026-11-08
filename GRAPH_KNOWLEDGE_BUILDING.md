@@ -187,48 +187,44 @@ Create MENTIONS and semantic relationships
 
 ```mermaid
 flowchart TD
-    A[Paper upload or PDF folder] --> B[File parser]
-    B --> C[ParsedDocument]
-    C --> D[Chunker]
-    D --> E[Paper chunks]
+    A[Parsed paper] --> B[Paper chunks]
+    B --> C[Chunk 1]
+    B --> D[Chunk 2]
+    B --> E[Chunk N]
 
-    E --> F[Ollama LLM]
-    F --> G[Entity extraction]
-    F --> H[Relationship extraction]
-    G --> I[Paper-wide graph aggregator]
-    H --> I
-    I --> J[Deduplicate entities and relationships]
+    C --> F[Ollama entity and relationship extraction]
+    D --> F
+    E --> F
 
-    C --> K[Metadata LLM extractor]
-    K --> L[Metadata CSV]
+    F --> G[Chunk extraction results]
+    G --> H[Paper-wide aggregation]
+    H --> I[Deduplicate entities]
+    H --> J[Deduplicate relationships]
+    I --> K[Validated graph result]
+    J --> K
 
-    E --> M[Embedding model]
-    M --> N[ChromaDB vector store]
+    K --> L[Neo4j graph builder]
+    L --> M[Document node]
+    L --> N[Entity nodes]
+    L --> O[MENTIONS edges]
+    L --> P[Semantic relationship edges]
 
-    J --> O[Neo4j graph builder]
-    O --> P[Document nodes]
-    O --> Q[Entity nodes]
-    O --> R[MENTIONS edges]
-    O --> S[Semantic relationship edges]
-
-    F -. timeout .-> T[Retry up to 2 times]
-    T -. retries exhausted .-> U[Rule-based fallback]
-    U --> I
+    F -. timeout .-> Q[Retry up to 2 times]
+    Q -. retries exhausted .-> R[Rule-based fallback]
+    R --> G
 ```
 
 ### Component responsibilities
 
-| Component | Responsibility |
+| Graph component | Responsibility |
 |---|---|
-| File parser | Extracts text, title, pages, and file metadata |
-| Chunker | Splits the complete paper into processable chunks |
-| Ollama LLM | Identifies entities and semantic relationships |
-| Graph aggregator | Combines extraction results from every chunk |
-| Metadata LLM extractor | Extracts title, authors, abstract, topics, and categories |
-| Embedding model | Converts chunks into vectors for similarity search |
-| ChromaDB | Stores vectorized chunks |
-| Neo4j graph builder | Stores nodes and graph relationships |
-| Rule-based fallback | Keeps ingestion running when LLM extraction fails |
+| Paper chunks | The complete paper sections sent for graph extraction |
+| Ollama LLM | Identifies entities and semantic relationships in each chunk |
+| Graph aggregator | Combines results from every chunk in the paper |
+| Entity deduplication | Merges entities by normalized name and category |
+| Relationship deduplication | Merges relationships by source, target, and type |
+| Neo4j graph builder | Writes the final nodes and relationships |
+| Rule-based fallback | Keeps graph extraction running after repeated LLM timeouts |
 
 To rebuild the graph for already-ingested papers without duplicating vector
 embeddings, run:
