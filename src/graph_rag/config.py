@@ -17,6 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
+# Load Arabic-specific settings if .env.arabic exists
+ARABIC_ENV_FILE = PROJECT_ROOT / ".env.arabic"
+if ARABIC_ENV_FILE.exists():
+    load_dotenv(dotenv_path=ARABIC_ENV_FILE, override=True)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -60,6 +65,11 @@ class Settings:
     APP_PORT: int = int(os.getenv("APP_PORT", "8501"))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     APP_LOG_FILE: Path = PROJECT_ROOT / os.getenv("APP_LOG_FILE", "data/app.log")
+
+    # ── Arabic Model Settings ──
+    ARABIC_MODEL_ENABLED: bool = os.getenv("ARABIC_MODEL_ENABLED", "false").lower() in ("true", "1", "yes")
+    ARABIC_PROMPT_LANGUAGE: str = os.getenv("ARABIC_PROMPT_LANGUAGE", "english")
+    ARABIC_RESPONSE_LANGUAGE: str = os.getenv("ARABIC_RESPONSE_LANGUAGE", "english")
 
     def ensure_directories(self) -> None:
         """Create required runtime directories if they don't exist."""
