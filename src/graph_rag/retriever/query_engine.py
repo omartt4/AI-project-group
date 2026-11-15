@@ -23,7 +23,7 @@ from graph_rag.retriever.query_classifier import QueryClassification, QueryClass
 
 logger = logging.getLogger(__name__)
 
-# Specialized system prompts per query class
+# Specialized system prompts per query class (English)
 SYSTEM_PROMPTS = {
     QueryClass.FACTUAL_LOOKUP: """You are an expert scientific AI research assistant.
 Answer the user's factual question concisely, accurately, and strictly based on the retrieved research excerpts.
@@ -54,26 +54,73 @@ Ensure proper attribution to the papers and page numbers cited.""",
 Respond helpfully, politely, and concisely. If the user asks what you can do, briefly explain that you can answer questions, compare techniques, trace knowledge graph relationships, and synthesize insights across the research paper library.""",
 }
 
+# Arabic system prompts per query class
+ARABIC_SYSTEM_PROMPTS = {
+    QueryClass.FACTUAL_LOOKUP: """أنت مساعد بحث علمي خبير بالذكاء الاصطناعي.
+أجب على سؤال المستخدم بدقة واختصار، وبشكل صارم بناءً على مقتطفات البحث المسترجعة.
+اذكر عنوان الورقة البحثية ورقم الصفحة لكل حقيقة أو معادلة رئيسية. تجنب التكهنات.""",
+
+    QueryClass.COMPARATIVE: """أنت مساعد بحث علمي خبير متخصص في التحليل المقارن للبحوث.
+قارن ووازن بين النماذج أو البنى أو الطرق المطلوبة من حيث:
+1. الاختلافات المعمارية الأساسية
+2. الأداء التجريبي والمقاييس (مجموعات البيانات، المقاييس)
+3. نقاط القوة والضعف والمقايضاته
+اذكر بوضوح مفاهيم الجسر الرابطة واذكر الأوراق البحثية ذات الصلة مع أرقام الصفحات.""",
+
+    QueryClass.MULTI_HOP_RELATIONAL: """أنت مساعد بحث علمي خبير لديك إمكانية الوصول إلى رسم بياني معرفي غني.
+تتبع واشرح الروابط العلائقية (مثلاً من اقترح أي طريقة، أي مجموعات بيانات معيارية تم تقييمها، ما التقنيات الأساسية تم استخدامها).
+أبرز بوضوح مسارات الرسم البياني المعرفي واذكر الأوراق البحثية المقابلة.""",
+
+    QueryClass.SUMMARIZATION: """أنت مساعد بحث علمي خبير.
+قم بتوليف نظرة شاملة ومنظمة جيداً على المستويات الموضوعية عبر المستندات البحثية المسترجعة.
+هيكل إجابتك باستخدام عناوين موضوعية، ملخصاً الاتجاهات الرئيسية والمنهجيات والنتائج عبر الأوراق المختلفة.
+نسب النتائج الرئيسية إلى عناوين الأوراق وصفحاتها المعنية.""",
+
+    QueryClass.EXPLORATORY_THEMATIC: """أنت مساعد بحث علمي خبير.
+قدم شرحاً شاملاً وعلمياً دقيقاً للموضوع.
+قم بتوليف الرؤى من مقتطفات البحث المتنوعة والمفاهيم المكتشفة في الرسم البياني.
+تأكد من الإسناد الصحيح للأوراق البحثية وأرقام الصفحات المذكورة.""",
+
+    QueryClass.CONVERSATIONAL: """أنت Graph RAG Studio، مساعد بحث علمي بالذكاء الاصطناعي مدعوم بنماذج Ollama المحلية وChromaDB وNeo4j.
+استجب بشكل مفيد ومهذب ومختصر. إذا سألك المستخدم عما يمكنك فعله، اشرح باختصار أنك يمكنك الإجابة على الأسئلة، ومقارنة التقنيات، وتتبع علاقات الرسم البياني المعرفي، وتوليف الرؤى عبر مكتبة الأوراق البحثية.""",
+}
+
 
 def build_prompts(
     question: str,
     context_text: str,
     classification: Optional[QueryClassification],
 ) -> tuple[str, str]:
-    """Generate adaptive system prompt and user prompt based on query intent."""
+    """Generate adaptive system prompt and user prompt based on query intent and language settings."""
     q_class = classification.query_class if classification else QueryClass.EXPLORATORY_THEMATIC
-    sys_prompt = SYSTEM_PROMPTS.get(q_class, SYSTEM_PROMPTS[QueryClass.EXPLORATORY_THEMATIC])
+
+    # Select language based on Arabic model settings
+    use_arabic = settings.ARABIC_MODEL_ENABLED and settings.ARABIC_PROMPT_LANGUAGE == "arabic"
+    prompts_dict = ARABIC_SYSTEM_PROMPTS if use_arabic else SYSTEM_PROMPTS
+    sys_prompt = prompts_dict.get(q_class, prompts_dict[QueryClass.EXPLORATORY_THEMATIC])
 
     if q_class == QueryClass.CONVERSATIONAL:
-        user_prompt = f"User: {question}\n\nAssistant:"
+        if use_arabic:
+            user_prompt = f"المستخدم: {question}\n\nالمساعد:"
+        else:
+            user_prompt = f"User: {question}\n\nAssistant:"
     else:
-        user_prompt = (
-            f"Research Context & Discovered Knowledge Graph:\n"
-            f"{context_text}\n\n"
-            f"User Question:\n"
-            f"{question}\n\n"
-            f"Scientific Answer:"
-        )
+        if use_arabic:
+            user_prompt = (
+                f"سياق البحث والرسم البياني المعرفي المكتشف:\n"
+                f"{context_text}\n\n"
+                f"سؤال المستخدم:\n"
+                f"{question}\n\n"
+                f"الإجابة العلمية:"
+            )
+        else:
+            user_prompt = (
+                f"Research Context & Discovered Knowledge Graph:\n"
+                f"{context_text}\n\n"
+                f"User Question:\n"
+                f"{question}\n\n"
+                f"Scientific Answer:"
+            )
 
     return sys_prompt, user_prompt
 

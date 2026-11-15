@@ -19,3 +19,8 @@ data/
 # Local PDF corpus
 pdfs/
 
+
+.env.arabic
+.venv/
+data/
+pdfs/
