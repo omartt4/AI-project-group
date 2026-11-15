@@ -38,7 +38,9 @@ from graph_rag.retriever.hybrid_retriever import hybrid_retriever
 def test_query_classification() -> None:
     """Test query intent classifier on various query types."""
     print("\n--- 1. Testing Query Classifier & Dynamic Hyperparameters ---")
-    test_cases = [
+
+    # Original baseline test cases (must still pass)
+    baseline_cases = [
         ("hi there", QueryClass.CONVERSATIONAL),
         ("what is RA-CapNet?", QueryClass.FACTUAL_LOOKUP),
         ("Compare Transformer vs LSTM models", QueryClass.COMPARATIVE),
@@ -47,17 +49,80 @@ def test_query_classification() -> None:
         ("What are the modern approaches in speaker diarization?", QueryClass.EXPLORATORY_THEMATIC),
     ]
 
-    for q, expected_class in test_cases:
-        res = query_classifier.classify(q)
-        print(f"Query: '{q}'")
-        print(f"  -> Class: {res.query_class.value} (Expected: {expected_class.value})")
-        print(f"  -> Rec K: {res.recommended_k}, Cand Pool: {res.candidate_pool_size}, MMR λ: {res.mmr_lambda}")
-        print(f"  -> Entities: {res.extracted_entities}")
-        if res.comparison_targets:
-            print(f"  -> Comparison Targets: {res.comparison_targets}")
-        assert res.query_class == expected_class, f"Expected {expected_class}, got {res.query_class}"
+    # --- New test cases covering C-1 to C-7 findings ---
+    new_cases = [
+        # C-1: "what are" (plural) must be FACTUAL_LOOKUP
+        ("what are the RAG types?", QueryClass.FACTUAL_LOOKUP),
+        ("what are transformers?", QueryClass.FACTUAL_LOOKUP),
+        # C-2: Factual queries up to 15 words must still be FACTUAL_LOOKUP
+        # "what is the difference between X and Y" is rightly COMPARATIVE; test a cleaner factual phrasing
+        ("what is the meaning of retrieval augmented generation in NLP context?", QueryClass.FACTUAL_LOOKUP),
+        # C-3: "types of / kinds of / categories of" -> FACTUAL_LOOKUP
+        ("what types of embeddings exist in modern NLP?", QueryClass.FACTUAL_LOOKUP),
+        ("list the kinds of RAG architectures", QueryClass.FACTUAL_LOOKUP),
+        # C-4: New SUMMARIZATION phrasings
+        ("give an overview across all papers on retrieval methods", QueryClass.SUMMARIZATION),
+        ("summarize the research on retrieval augmented generation", QueryClass.SUMMARIZATION),
+        ("what does the corpus say about attention mechanisms?", QueryClass.SUMMARIZATION),
+        # C-5: RELATIONAL — connection/relate phrasings
+        ("what is the connection between RAG and LLMs?", QueryClass.MULTI_HOP_RELATIONAL),
+        ("how does BERT relate to attention mechanisms?", QueryClass.MULTI_HOP_RELATIONAL),
+        ("how are dense and sparse retrieval linked?", QueryClass.MULTI_HOP_RELATIONAL),
+        # C-6: Conversational with punctuation
+        ("hi, how are you?", QueryClass.CONVERSATIONAL),
+        ("hello, can you help me?", QueryClass.CONVERSATIONAL),
+        ("thanks!", QueryClass.CONVERSATIONAL),
+        # "what are the modern approaches" -> EXPLORATORY (adjective chain blocks FACTUAL)
+        ("what are the modern approaches in speaker diarization?", QueryClass.EXPLORATORY_THEMATIC),
+    ]
 
-    print("✅ Query Classification tests passed!")
+    all_cases = baseline_cases + new_cases
+    failures = []
+
+    for q, expected_class in all_cases:
+        res = query_classifier.classify(q)
+        status = "✅" if res.query_class == expected_class else "❌"
+        print(f"{status} Query: '{q}'")
+        print(f"   -> Class: {res.query_class.value} (Expected: {expected_class.value})")
+        print(f"   -> Rec K: {res.recommended_k}, Cand Pool: {res.candidate_pool_size}, MMR λ: {res.mmr_lambda}")
+        print(f"   -> Entities: {res.extracted_entities}")
+        if res.comparison_targets:
+            print(f"   -> Comparison Targets: {res.comparison_targets}")
+        if res.query_class != expected_class:
+            failures.append((q, expected_class.value, res.query_class.value))
+
+    # Verify key parameter values for high-priority intents
+    print("\n-- Parameter Verification --")
+
+    summ = query_classifier.classify("Summarize all files in the knowledge base")
+    assert summ.recommended_k == 15, f"SUMMARIZATION K should be 15, got {summ.recommended_k}"
+    assert summ.candidate_pool_size == 45, f"SUMMARIZATION pool should be 45, got {summ.candidate_pool_size}"
+    assert summ.graph_limit == 25, f"SUMMARIZATION graph_limit should be 25, got {summ.graph_limit}"
+    print(f"✅ SUMMARIZATION params: K={summ.recommended_k}, pool={summ.candidate_pool_size}, graph_limit={summ.graph_limit}")
+
+    expl = query_classifier.classify("What are the modern approaches in speaker diarization?")
+    assert expl.recommended_k >= 8, f"EXPLORATORY K should be >= 8, got {expl.recommended_k}"
+    assert expl.candidate_pool_size == expl.recommended_k * 3, "EXPLORATORY pool should be K*3"
+    print(f"✅ EXPLORATORY params: K={expl.recommended_k}, pool={expl.candidate_pool_size}")
+
+    comp = query_classifier.classify("Compare Transformer vs LSTM models")
+    assert comp.recommended_k >= 6, f"COMPARATIVE K should be >= 6, got {comp.recommended_k}"
+    print(f"✅ COMPARATIVE params: K={comp.recommended_k}, targets={comp.comparison_targets}")
+
+    # Entity stop word check (C-7)
+    summ_ents = query_classifier.classify("Summarize all files in the knowledge base")
+    bad_stopwords = {"summarize", "all", "files", "knowledge", "base"}
+    polluted = [e for e in summ_ents.extracted_entities if e.lower() in bad_stopwords]
+    assert not polluted, f"Entity extraction returned stop words: {polluted}"
+    print(f"✅ Entity stop word filter: no pollution (entities={summ_ents.extracted_entities})")
+
+    if failures:
+        print(f"\n❌ {len(failures)} classification failures:")
+        for q, exp, got in failures:
+            print(f"   '{q}': expected {exp}, got {got}")
+        raise AssertionError(f"{len(failures)} test case(s) failed")
+
+    print("\n✅ Query Classification tests passed!")
 
 
 def test_mmr_diversity() -> None:

@@ -5,7 +5,7 @@ Indexes the documents in the `pdfs/` folder into ChromaDB and Neo4j.
 Enforces deduplication: documents already indexed in `pdfs/metadata.csv` are skipped.
 
 Usage:
-    uv run python scripts/ingest.py [--limit N]
+    uv run python scripts/ingest.py [--limit N] [--rebuild-graph]
 """
 
 import argparse
@@ -28,6 +28,11 @@ def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(description="Graph RAG Ingestion CLI")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of PDFs to process")
+    parser.add_argument(
+        "--rebuild-graph",
+        action="store_true",
+        help="Re-extract the full graph for existing documents without duplicating embeddings",
+    )
     args = parser.parse_args()
 
     print("=" * 65)
@@ -49,7 +54,11 @@ def main() -> None:
         print(f"[{current}/{total}] {msg}", flush=True)
 
     print("\nStarting batch ingestion...", flush=True)
-    results = pipeline.ingest_batch_folder(progress_callback=progress_callback, limit=args.limit)
+    results = pipeline.ingest_batch_folder(
+        progress_callback=progress_callback,
+        limit=args.limit,
+        rebuild_graph=args.rebuild_graph,
+    )
 
     completed = [r for r in results if r.status == "completed"]
     skipped = [r for r in results if r.status == "skipped_duplicate"]

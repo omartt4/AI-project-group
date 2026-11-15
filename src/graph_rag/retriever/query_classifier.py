@@ -52,34 +52,62 @@ class QueryClassifier:
     ]
 
     SUMMARIZATION_PATTERNS = [
+        # Core summarization verbs and noun phrases
         r"\b(?:summarize|summary|overview|all\s+papers|all\s+files|main\s+topics|across\s+the\s+knowledge\s+base)\b",
         r"\b(?:what\s+papers|list\s+all|corpus|review\s+of|synthesize|landscape)\b",
+        # C-4: Natural phrasing variants that were missing
+        r"\bacross\s+all\s+(?:papers?|documents?|files?|research)\b",
+        r"\bwhat\s+do\s+(?:all|the)\s+(?:papers?|documents?|files?)\s+say\b",
+        r"\bsummarize\s+the\s+research\s+(?:on|about)\b",
+        r"\bthroughout\s+the\s+(?:knowledge\s+base|corpus|dataset|documents?)\b",
+        r"\bwhat\s+does\s+the\s+(?:corpus|knowledge\s+base)\s+say\b",
+        r"\bin\s+all\s+(?:the\s+)?(?:papers?|documents?|files?)\b",
     ]
 
     RELATIONAL_PATTERNS = [
         r"\b(?:who\s+authored|written\s+by|published\s+by|proposed\s+by|evaluated\s+on|tested\s+on)\b",
         r"\b(?:(?:which|what)\s+datasets?|used\s+by|applied\s+to|uses?\s+method|related\s+to|connected\s+with|derived\s+from)\b",
         r"\b(?:relationship\s+between|link\s+between|association\s+between)\b",
+        # C-5: Missing connection/relation phrasings
+        r"\b(?:connection|linkage)\s+between\b",
+        r"\bhow\s+(?:does|do)\s+.+\s+relate\s+to\b",
+        r"\bhow\s+are\s+.+\s+(?:connected|linked|related)\b",
+        r"\bwhat\s+(?:is|are)\s+the\s+(?:link|connection|relationship)\s+between\b",
     ]
 
     FACTUAL_PATTERNS = [
+        # C-1: "what are" for direct definitional/plural questions.
+        # Uses a tighter pattern: "what are X?" where X is a noun/acronym directly (not
+        # "what are the modern/current/main..." which is exploratory).
+        # Specifically: "what are" followed by an optional determiner then a short noun (≤3 words).
         r"\b(?:what\s+is|define|definition\s+of|meaning\s+of|formula\s+for|exact|specific)\b",
         r"\b(?:when\s+was|where\s+is|what\s+does\s+.+\s+stand\s+for)\b",
+        # "what are X?" where X starts directly (no "the modern/current" adjective chain)
+        r"\bwhat\s+are\s+(?!the\s+(?:modern|current|main|key|best|latest|common|various|different|major|top|primary|leading|popular|existing|available|typical|recent|important|significant|general|basic|advanced|new|emerging))\b",
+        # C-3: Enumeration/category questions treated as factual
+        r"\b(?:types?\s+of|kinds?\s+of|categories?\s+of|forms?\s+of|variants?\s+of)\b",
     ]
 
     CONVERSATIONAL_PATTERNS = [
-        r"^(?:hi|hello|hey|greetings|good\s+morning|good\s+evening|good\s+afternoon)(?:\s+(?:there|all|team|assistant|bot|friend))?[\s!.]*$",
-        r"^(?:thanks|thank\s+you|thx|cheers|bye|goodbye|see\s+you)[\s!.]*$",
+        # C-6: Removed strict ^...$ anchors; strip punctuation before matching (done in classify())
+        r"\b(?:hi|hello|hey|greetings|good\s+morning|good\s+evening|good\s+afternoon)(?:\s+(?:there|all|team|assistant|bot|friend))?\b",
+        r"\b(?:thanks|thank\s+you|thx|cheers|bye|goodbye|see\s+you)\b",
         r"^(?:who\s+are\s+you|what\s+can\s+you\s+do|how\s+are\s+you|help|how\s+do\s+you\s+work)[\s!?.]*$",
     ]
 
+    # C-7: Expanded stop words — include RAG meta-words that pollute entity extraction
     STOP_WORDS = {
         "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
         "the", "and", "or", "for", "with", "about", "into", "from", "that", "this",
         "these", "those", "can", "could", "would", "should", "will", "shall", "may",
         "paper", "papers", "file", "files", "document", "documents", "tell", "show",
         "explain", "give", "please", "using", "used", "does", "have", "been", "were",
-        "there", "here", "them", "they", "their", "your", "mine"
+        "there", "here", "them", "they", "their", "your", "mine",
+        # Meta-words that are meaningless as graph entity keywords
+        "summarize", "summary", "overview", "describe", "list", "all", "every",
+        "across", "throughout", "research", "knowledge", "base", "corpus",
+        "approach", "approaches", "method", "methods", "technique", "techniques",
+        "main", "key", "important", "various", "different", "general",
     }
 
     def classify(self, query: str) -> QueryClassification:
@@ -90,9 +118,13 @@ class QueryClassifier:
         raw_query = query.strip()
         lower_query = raw_query.lower()
 
+        # C-6: Strip punctuation before conversational matching so commas/exclamation
+        # marks don't break greeting detection (e.g. "hi, how are you?")
+        stripped_query = re.sub(r"[^\w\s]", " ", lower_query).strip()
+
         # 1. Check for Conversational / Greeting
         for pattern in self.CONVERSATIONAL_PATTERNS:
-            if re.search(pattern, lower_query):
+            if re.search(pattern, stripped_query):
                 return QueryClassification(
                     query_class=QueryClass.CONVERSATIONAL,
                     confidence=0.95,
@@ -112,17 +144,21 @@ class QueryClassifier:
         comparison_targets: List[str] = []
         if is_comparative or " vs " in lower_query or " versus " in lower_query:
             comparison_targets = self._extract_comparison_targets(raw_query)
+            # A10: Dynamic K based on number of comparison targets (3 chunks per target, capped at 16)
+            comparison_count = max(2, len(comparison_targets) if comparison_targets else len(extracted_entities))
+            comp_k = min(16, comparison_count * 3)
+            comp_pool = comp_k * 3
             return QueryClassification(
                 query_class=QueryClass.COMPARATIVE,
                 confidence=0.90 if comparison_targets else 0.80,
                 extracted_entities=extracted_entities,
                 comparison_targets=comparison_targets,
-                recommended_k=7,
-                candidate_pool_size=20,
+                recommended_k=comp_k,
+                candidate_pool_size=comp_pool,
                 mmr_lambda=0.50,  # Balanced diversity to cover both comparative targets
                 graph_depth=2,    # Look for bridge entities linking both targets
                 graph_limit=12,
-                strategy_summary="Comparative intent: balanced MMR diversity (λ=0.50) + bridge concept discovery in graph.",
+                strategy_summary=f"Comparative intent: dynamic K={comp_k} ({comparison_count} targets × 3) + bridge concept discovery in graph.",
             )
 
         # 3. Check for Summarization / Broad Landscape queries
@@ -131,12 +167,13 @@ class QueryClassifier:
                 query_class=QueryClass.SUMMARIZATION,
                 confidence=0.88,
                 extracted_entities=extracted_entities,
-                recommended_k=9,
-                candidate_pool_size=25,
+                # R-1: Raised from K=9/pool=25 to K=15/pool=45 for 100-paper corpus coverage
+                recommended_k=15,
+                candidate_pool_size=45,
                 mmr_lambda=0.40,  # High diversity across distinct documents
-                graph_depth=1,
-                graph_limit=18,
-                strategy_summary="Summarization intent: high diversity MMR (λ=0.40) across distinct documents + top graph topic hubs.",
+                graph_depth=2,
+                graph_limit=25,
+                strategy_summary="Summarization intent: high diversity MMR (λ=0.40, K=15) across distinct documents + top graph topic hubs.",
             )
 
         # 4. Check for Multi-Hop / Relational queries
@@ -154,7 +191,8 @@ class QueryClassifier:
             )
 
         # 5. Check for Factual / Definition queries
-        if any(re.search(p, lower_query) for p in self.FACTUAL_PATTERNS) and len(lower_query.split()) <= 10:
+        # C-2: Raised word-count gate from <= 10 to <= 15 to allow longer but still factual queries
+        if any(re.search(p, lower_query) for p in self.FACTUAL_PATTERNS) and len(lower_query.split()) <= 15:
             return QueryClassification(
                 query_class=QueryClass.FACTUAL_LOOKUP,
                 confidence=0.85,
@@ -168,8 +206,8 @@ class QueryClassifier:
             )
 
         # 6. Default to Exploratory Thematic Query
-        # Adjust K slightly based on query length and number of entities
-        rec_k = 6 if len(extracted_entities) >= 2 else 5
+        # A9: Raised base K from 5/6 to 8/10 for broader evidence coverage
+        rec_k = 10 if len(extracted_entities) >= 2 else 8
         cand_size = rec_k * 3
         return QueryClassification(
             query_class=QueryClass.EXPLORATORY_THEMATIC,
@@ -190,6 +228,7 @@ class QueryClassifier:
         # 1. Find capitalized phrases or acronyms (e.g., "RA-CapNet", "BERT", "Capsule Networks")
         acronyms_and_names = re.findall(r"\b[A-Z][a-zA-Z0-9_-]+(?:\s+[A-Z][a-zA-Z0-9_-]+)*\b", query)
         for term in acronyms_and_names:
+            # C-7: Always compare lowercase to ensure stop word list catches capitalized variants
             if term.lower() not in self.STOP_WORDS and len(term) >= 2:
                 entities.append(term)
 
@@ -203,6 +242,7 @@ class QueryClassifier:
         words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query)
         for w in words:
             w_clean = w.strip()
+            # C-7: Normalize to lowercase for stop word check
             if w_clean.lower() not in self.STOP_WORDS and not any(w_clean.lower() in e.lower() for e in entities):
                 if len(entities) < 6:
                     entities.append(w_clean)

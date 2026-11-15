@@ -29,7 +29,8 @@ class OllamaClient:
         self.base_url = base_url or settings.OLLAMA_BASE_URL
         self.llm_model = llm_model or settings.OLLAMA_LLM_MODEL
         self.embed_model = embed_model or settings.OLLAMA_EMBED_MODEL
-        self.client = ollama.Client(host=self.base_url, timeout=60.0)
+        self.timeout_retries = settings.OLLAMA_TIMEOUT_RETRIES
+        self.client = ollama.Client(host=self.base_url, timeout=settings.OLLAMA_TIMEOUT_SECONDS)
 
     def is_available(self) -> bool:
         """Check if Ollama server is running and accessible."""
@@ -65,10 +66,10 @@ class OllamaClient:
         # Try configured model, fallback to any available qwen or local model
         target_model = self.llm_model
         try:
-            response = self.client.chat(
+            response = self._chat_with_timeout_retries(
                 model=target_model,
                 messages=messages,
-                options={"temperature": temperature},
+                temperature=temperature,
             )
             return response["message"]["content"].strip()
         except Exception as e:
@@ -80,13 +81,39 @@ class OllamaClient:
                 if fallback and fallback != target_model:
                     logger.info(f"Model '{target_model}' not found, falling back to installed '{fallback}'")
                     self.llm_model = fallback
-                    response = self.client.chat(
+                    response = self._chat_with_timeout_retries(
                         model=fallback,
                         messages=messages,
-                        options={"temperature": temperature},
+                        temperature=temperature,
                     )
                     return response["message"]["content"].strip()
             raise
+
+    def _chat_with_timeout_retries(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+    ) -> Any:
+        """Retry timed-out generations before allowing the caller to fall back."""
+        for attempt in range(self.timeout_retries + 1):
+            try:
+                return self.client.chat(
+                    model=model,
+                    messages=messages,
+                    options={"temperature": temperature},
+                )
+            except (httpx.TimeoutException, TimeoutError) as exc:
+                if attempt >= self.timeout_retries:
+                    raise
+                logger.warning(
+                    "Ollama request timed out; retrying (%d/%d): %s",
+                    attempt + 1,
+                    self.timeout_retries,
+                    exc,
+                )
+
+        raise RuntimeError("Ollama request retry loop exited unexpectedly")
 
     def get_embedding(self, text: str) -> List[float]:
         """Generate embedding vector for a single text chunk."""

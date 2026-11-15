@@ -20,13 +20,19 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from graph_rag.config import settings
 from graph_rag.database.db import get_db_connection
 from graph_rag.embeddings.vector_store import vector_store
-from graph_rag.graph.entity_extractor import entity_extractor
+from graph_rag.graph.entity_extractor import (
+    ExtractedEntity,
+    ExtractedRelation,
+    GraphExtractionResult,
+    entity_extractor,
+)
 from graph_rag.graph.graph_builder import graph_builder
 from graph_rag.ingestion.archive_handler import archive_handler
 from graph_rag.ingestion.chunker import chunker
 from graph_rag.ingestion.dedup_checker import compute_hash, dedup_checker
 from graph_rag.ingestion.file_handler import file_handler
 from graph_rag.ingestion.metadata_manager import metadata_manager
+from graph_rag.ingestion.paper_metadata import extract_paper_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,7 @@ class IngestionPipeline:
         folder_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         limit: Optional[int] = None,
+        rebuild_graph: bool = False,
     ) -> List[IngestionResult]:
         """
         Run initial batch ingestion over pdfs/ folder.
@@ -88,7 +95,7 @@ class IngestionPipeline:
 
             # Check if already processed
             already_ingested = bool(rec.get("ingested_at") and rec.get("file_hash"))
-            if already_ingested:
+            if already_ingested and not rebuild_graph:
                 results.append(
                     IngestionResult(
                         filename=filename,
@@ -121,22 +128,24 @@ class IngestionPipeline:
                 if progress_callback:
                     progress_callback(idx, total_files, f"Created {len(chunks)} chunks: {filename}")
 
-                # 4. Store in ChromaDB
-                self.vector_db.add_chunks(chunks)
-                if progress_callback:
-                    progress_callback(idx, total_files, f"Embedded and stored {len(chunks)} chunks: {filename}")
+                # 4. Store in ChromaDB unless only rebuilding the graph.
+                if not rebuild_graph:
+                    self.vector_db.add_chunks(chunks)
+                    if progress_callback:
+                        progress_callback(idx, total_files, f"Embedded and stored {len(chunks)} chunks: {filename}")
 
                 # 5. Extract entities and populate Neo4j Graph
                 self.graph_db.add_document_node(
                     document_name=filename,
                     title=doc_title,
-                    metadata={"topic": rec.get("topic", "Research Paper"), "source": "initial"},
+                    metadata={
+                        "topic": rec.get("topic", "Research Paper"),
+                        "source": rec.get("source", "initial"),
+                    },
                 )
 
-                # Extract entities from one representative chunk to keep batch ingestion bounded.
-                for c in chunks[:1]:
-                    graph_result = entity_extractor.extract(c.text, document_title=doc_title)
-                    self.graph_db.add_entities_and_relations(filename, graph_result)
+                graph_result = self._extract_paper_graph(chunks, doc_title)
+                self.graph_db.add_entities_and_relations(filename, graph_result)
                 if progress_callback:
                     progress_callback(idx, total_files, f"Updated Neo4j graph: {filename}")
 
@@ -243,26 +252,24 @@ class IngestionPipeline:
             self.vector_db.add_chunks(chunks)
 
             # Step 6: Build Knowledge Graph in Neo4j
+            extracted_metadata = extract_paper_metadata(parsed_doc)
+            doc_title = extracted_metadata["title"]
+            topic = extracted_metadata["topic"]
             self.graph_db.add_document_node(
                 document_name=filename,
                 title=doc_title,
-                metadata={"topic": "User Upload", "source": "upload"},
+                metadata={"topic": topic, "source": "upload"},
             )
-            for c in chunks[:3]:
-                graph_result = entity_extractor.extract(c.text, document_title=doc_title)
-                self.graph_db.add_entities_and_relations(filename, graph_result)
+            graph_result = self._extract_paper_graph(chunks, doc_title)
+            self.graph_db.add_entities_and_relations(filename, graph_result)
 
             # Step 7: Append to metadata.csv
             new_meta_row = {
-                "topic": "User Upload",
+                "topic": topic,
                 "title": doc_title,
-                "authors": parsed_doc.metadata.get("author", "User Upload"),
-                "published": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "arxiv_id": "",
-                "abstract": parsed_doc.full_text[:300] + "..." if len(parsed_doc.full_text) > 300 else parsed_doc.full_text,
-                "abstract_url": "",
-                "pdf_url": "",
-                "categories": "user-upload",
+                "authors": extracted_metadata["authors"],
+                "abstract": extracted_metadata["abstract"],
+                "categories": extracted_metadata["categories"],
                 "local_pdf": filename,
                 "source": "upload",
                 "file_hash": file_hash,
@@ -336,6 +343,38 @@ class IngestionPipeline:
                 error_message=str(e),
                 file_hash=file_hash,
             )
+
+    @staticmethod
+    def _extract_paper_graph(chunks: List[Any], document_title: str) -> GraphExtractionResult:
+        """Extract and merge graph data from every chunk in a paper."""
+        entities: Dict[tuple[str, str], ExtractedEntity] = {}
+        relations: Dict[tuple[str, str, str], ExtractedRelation] = {}
+
+        for chunk in chunks:
+            result = entity_extractor.extract(chunk.text, document_title=document_title)
+            for entity in result.entities:
+                key = (entity.name.strip().casefold(), entity.category.strip().casefold())
+                if key not in entities or len(entity.description) > len(entities[key].description):
+                    entities[key] = entity
+            for relation in result.relations:
+                key = (
+                    relation.source.strip().casefold(),
+                    relation.target.strip().casefold(),
+                    relation.relation_type.strip().upper(),
+                )
+                if key not in relations or len(relation.description) > len(relations[key].description):
+                    relations[key] = relation
+
+        entity_names = {entity.name.casefold() for entity in entities.values()}
+        merged_relations = [
+            relation
+            for relation in relations.values()
+            if relation.source.casefold() in entity_names and relation.target.casefold() in entity_names
+        ]
+        return GraphExtractionResult(
+            entities=list(entities.values()),
+            relations=merged_relations,
+        )
 
     # ── Mode B Helper: Archive Upload Handler ──
     def ingest_uploaded_archive(

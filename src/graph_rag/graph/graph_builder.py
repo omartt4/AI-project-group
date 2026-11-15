@@ -61,6 +61,14 @@ class GraphBuilder:
         driver = self.get_driver()
         return driver is not None
 
+    def _mark_offline(self, error: Exception) -> None:
+        """Disable graph writes after a connection-level failure."""
+        logger.warning("Neo4j graph unavailable; continuing without graph writes: %s", error)
+        self._is_offline = True
+        if self._driver:
+            self._driver.close()
+            self._driver = None
+
     def init_constraints(self) -> None:
         """Create uniqueness constraints and indexes in Neo4j."""
         driver = self.get_driver()
@@ -71,12 +79,12 @@ class GraphBuilder:
             "CREATE CONSTRAINT doc_name_unique IF NOT EXISTS FOR (d:Document) REQUIRE d.name IS UNIQUE",
             "CREATE CONSTRAINT entity_name_cat IF NOT EXISTS FOR (e:Entity) REQUIRE (e.name, e.category) IS UNIQUE",
         ]
-        with driver.session() as session:
-            for q in queries:
-                try:
+        try:
+            with driver.session() as session:
+                for q in queries:
                     session.run(q)
-                except Exception as e:
-                    logger.debug(f"Constraint query note: {e}")
+        except Exception as error:
+            self._mark_offline(error)
 
     def add_document_node(
         self,
@@ -99,14 +107,17 @@ class GraphBuilder:
         ON MATCH SET d.title = $title,
                      d.topic = $topic
         """
-        with driver.session() as session:
-            session.run(
-                query,
-                name=document_name,
-                title=title,
-                topic=meta.get("topic", "General"),
-                source=meta.get("source", "upload"),
-            )
+        try:
+            with driver.session() as session:
+                session.run(
+                    query,
+                    name=document_name,
+                    title=title,
+                    topic=meta.get("topic", "General"),
+                    source=meta.get("source", "upload"),
+                )
+        except Exception as error:
+            self._mark_offline(error)
 
     def add_entities_and_relations(
         self,
@@ -118,40 +129,40 @@ class GraphBuilder:
         if not driver or not result.entities:
             return
 
-        with driver.session() as session:
-            # 1. Add entities and link to Document
-            for entity in result.entities:
-                entity_query = """
-                MATCH (d:Document {name: $doc_name})
-                MERGE (e:Entity {name: $name, category: $category})
-                ON CREATE SET e.description = $description
-                MERGE (d)-[:MENTIONS]->(e)
-                """
-                session.run(
-                    entity_query,
-                    doc_name=document_name,
-                    name=entity.name,
-                    category=entity.category,
-                    description=entity.description,
-                )
+        try:
+            with driver.session() as session:
+                # 1. Add entities and link to Document
+                for entity in result.entities:
+                    entity_query = """
+                    MATCH (d:Document {name: $doc_name})
+                    MERGE (e:Entity {name: $name, category: $category})
+                    ON CREATE SET e.description = $description
+                    MERGE (d)-[:MENTIONS]->(e)
+                    """
+                    session.run(
+                        entity_query,
+                        doc_name=document_name,
+                        name=entity.name,
+                        category=entity.category,
+                        description=entity.description,
+                    )
 
-            # 2. Add relationships between entities
-            for rel in result.relations:
-                rel_query = f"""
-                MATCH (s:Entity {{name: $source}})
-                MATCH (t:Entity {{name: $target}})
-                MERGE (s)-[r:{rel.relation_type}]->(t)
-                ON CREATE SET r.description = $desc
-                """
-                try:
+                # 2. Add relationships between entities
+                for rel in result.relations:
+                    rel_query = f"""
+                    MATCH (s:Entity {{name: $source}})
+                    MATCH (t:Entity {{name: $target}})
+                    MERGE (s)-[r:{rel.relation_type}]->(t)
+                    ON CREATE SET r.description = $desc
+                    """
                     session.run(
                         rel_query,
                         source=rel.source,
                         target=rel.target,
                         desc=rel.description,
                     )
-                except Exception as e:
-                    logger.debug(f"Edge creation error: {e}")
+        except Exception as error:
+            self._mark_offline(error)
 
     def get_graph_stats(self) -> Dict[str, int]:
         """Return counts of nodes and relationships in Neo4j."""

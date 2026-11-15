@@ -1,17 +1,9 @@
-"""
-Metadata Manager module.
-
-Serves as the single source of truth for all documents in the system.
-Maintains and updates `pdfs/metadata.csv` with tracking columns:
-- topic, title, authors, published, arxiv_id, abstract, abstract_url, pdf_url, categories, local_pdf
-- source: 'initial' | 'upload'
-- file_hash: SHA-256 hash of the document content
-- ingested_at: ISO timestamp of ingestion
-"""
+"""Metadata manager for the document registry."""
 
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Set
 import pandas as pd
 
@@ -24,17 +16,81 @@ EXPECTED_COLUMNS = [
     "topic",
     "title",
     "authors",
-    "published",
-    "arxiv_id",
     "abstract",
-    "abstract_url",
-    "pdf_url",
     "categories",
     "local_pdf",
     "source",
     "file_hash",
     "ingested_at",
 ]
+
+
+def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
+    """Score broad research areas using document title and text."""
+    content = f"{title} {text}".lower()
+    return {
+        "NLP": sum(
+            len(re.findall(rf"\b{re.escape(keyword)}\b", content))
+            for keyword in (
+                "natural language",
+                "nlp",
+                "language model",
+                "large language model",
+                "llm",
+                "text",
+                "speech",
+                "dialogue",
+                "question answering",
+                "relation extraction",
+                "named entity",
+                "agent",
+            )
+        ),
+        "Computer_Vision": sum(
+            len(re.findall(rf"\b{re.escape(keyword)}\b", content))
+            for keyword in (
+                "computer vision",
+                "image",
+                "visual",
+                "video",
+                "object detection",
+                "segmentation",
+                "3d reconstruction",
+                "scene",
+            )
+        ),
+        "Machine_Learning": sum(
+            len(re.findall(rf"\b{re.escape(keyword)}\b", content))
+            for keyword in (
+                "machine learning",
+                "deep learning",
+                "neural network",
+                "optimization",
+                "inference",
+                "training",
+                "classification",
+                "regression",
+                "reinforcement learning",
+                "chiplet",
+                "hardware",
+            )
+        ),
+    }
+
+
+def infer_topics(title: str = "", text: str = "") -> str:
+    """Infer one or more broad research areas from a paper."""
+    scores = _topic_scores(title, text)
+    highest = max(scores.values())
+    if not highest:
+        return "Machine_Learning"
+    selected = [topic for topic, score in scores.items() if score >= highest * 0.5]
+    return "; ".join(selected)
+
+
+def infer_topic(title: str = "", text: str = "") -> str:
+    """Infer the primary broad research area from a paper."""
+    return infer_topics(title, text).split("; ", 1)[0]
 
 
 class MetadataManager:
@@ -69,11 +125,65 @@ class MetadataManager:
             if "source" in df.columns:
                 mask = df["source"].isna() | (df["source"] == "")
                 if mask.any():
-                    df.loc[mask, "source"] = "initial"
+                    upload_mask = df["topic"].astype(str).str.strip().str.lower().isin(
+                        {"user upload", "user-upload"}
+                    )
+                    df.loc[mask & upload_mask, "source"] = "upload"
+                    df.loc[mask & ~upload_mask, "source"] = "initial"
                     modified = True
+
+            modified |= self._repair_upload_rows(df)
+            if list(df.columns) != EXPECTED_COLUMNS:
+                df = df[EXPECTED_COLUMNS]
+                modified = True
 
             if modified:
                 df.to_csv(self.metadata_path, index=False)
+
+    @staticmethod
+    def _repair_upload_rows(df: pd.DataFrame) -> bool:
+        """Repair legacy upload rows whose values were written in shifted columns."""
+        modified = False
+        upload_mask = (
+            df["topic"].astype(str).str.strip().str.lower().isin({"user upload", "user-upload"})
+            | df["source"].astype(str).str.strip().str.lower().eq("upload")
+        )
+
+        for index in df.index[upload_mask]:
+            # A legacy row omitted the trailing schema columns and shifted the
+            # filename, source, hash, and timestamp into earlier columns.
+            if (
+                "published" in df.columns
+                and "arxiv_id" in df.columns
+                and str(df.at[index, "authors"]).strip().lower() == "upload"
+                and re.fullmatch(r"[0-9a-f]{64}", str(df.at[index, "published"]).strip(), re.I)
+                and str(df.at[index, "arxiv_id"]).strip()
+            ):
+                filename = str(df.at[index, "title"]).strip()
+                file_hash = str(df.at[index, "published"]).strip().lower()
+                ingested_at = str(df.at[index, "arxiv_id"]).strip()
+                df.at[index, "local_pdf"] = filename
+                df.at[index, "source"] = "upload"
+                df.at[index, "file_hash"] = file_hash
+                df.at[index, "ingested_at"] = ingested_at
+                df.at[index, "authors"] = ""
+                df.at[index, "abstract"] = ""
+                modified = True
+
+            title = str(df.at[index, "title"]).strip()
+            abstract = str(df.at[index, "abstract"]).strip()
+            inferred_topic = infer_topics(title, abstract)
+            if str(df.at[index, "topic"]).strip().lower() in {"user upload", "user-upload"}:
+                df.at[index, "topic"] = inferred_topic
+                modified = True
+            if not str(df.at[index, "categories"]).strip():
+                df.at[index, "categories"] = inferred_topic
+                modified = True
+            if not str(df.at[index, "source"]).strip():
+                df.at[index, "source"] = "upload"
+                modified = True
+
+        return modified
 
     def load_metadata(self) -> pd.DataFrame:
         """Return the current metadata dataframe."""
@@ -134,6 +244,9 @@ class MetadataManager:
         with _csv_lock:
             df = self.load_metadata()
             new_row = {col: doc_data.get(col, "") for col in EXPECTED_COLUMNS}
+            new_row["topic"] = new_row["topic"] or infer_topics(
+                str(new_row["title"]), str(new_row["abstract"])
+            )
             if not new_row.get("source"):
                 new_row["source"] = "upload"
             if not new_row.get("ingested_at"):

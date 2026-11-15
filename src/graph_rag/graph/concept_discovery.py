@@ -62,6 +62,11 @@ class ConceptDiscoveryEngine:
         hub_concepts: List[DiscoveredConcept] = []
         seen_edges: Set[str] = set()
 
+        # B1: Keyword cap raised from 4 to 6 so additional entities are queried in Neo4j.
+        # For comparative or summarization intents (signalled by higher limit values or more
+        # targets), process up to 6 keywords; otherwise cap at 4 to keep latency reasonable.
+        kw_cap = 6 if (comparison_targets or limit >= 20) else 4
+
         try:
             with driver.session() as session:
                 # 1. If comparative query with targets, discover bridge concepts
@@ -79,9 +84,15 @@ class ConceptDiscoveryEngine:
                             relationships.append(rel)
 
                 # 2. Concept expansion for key terms / entities
-                for kw in keywords[:4]:
+                # B3: Use a per-keyword Cypher limit so each keyword gets fair representation,
+                # separate from the final total cap (limit).  Formula: divide the total budget
+                # evenly among keywords with a minimum of 5 rows per keyword.
+                kw_count = max(1, len(keywords[:kw_cap]))
+                per_kw_limit = max(5, limit // kw_count)
+
+                for kw in keywords[:kw_cap]:
                     direct_nodes, node_rels = self._expand_entity_neighborhood(
-                        session, kw, max_depth=max_depth, limit=limit
+                        session, kw, max_depth=max_depth, limit=per_kw_limit
                     )
                     for node in direct_nodes:
                         if node.name not in discovered_entities:
@@ -95,7 +106,10 @@ class ConceptDiscoveryEngine:
 
                 # 3. Discover Thematic Hubs if we have keywords
                 if keywords:
-                    hubs = self._find_thematic_hubs(session, keywords, limit=5)
+                    # B2: Hub limit scales with graph_limit (÷3) rather than being
+                    # hardcoded at 5.  Minimum of 5, so small queries are unchanged.
+                    hub_limit = max(5, limit // 3)
+                    hubs = self._find_thematic_hubs(session, keywords, limit=hub_limit)
                     hub_concepts.extend(hubs)
                     for h in hubs:
                         if h.name not in discovered_entities:
@@ -109,6 +123,8 @@ class ConceptDiscoveryEngine:
         for c in discovered_entities.values():
             categories_found.setdefault(c.category, []).append(c.name)
 
+        # B3: Final total cap uses the caller-supplied `limit` (graph_limit), independent
+        # of the per-keyword Cypher limit used above.
         return ConceptDiscoveryResult(
             concepts=list(discovered_entities.values()),
             relationships=relationships[:limit],

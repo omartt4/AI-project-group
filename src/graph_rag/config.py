@@ -26,6 +26,8 @@ class Settings:
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
     OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+    OLLAMA_TIMEOUT_SECONDS: float = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180.0"))
+    OLLAMA_TIMEOUT_RETRIES: int = int(os.getenv("OLLAMA_TIMEOUT_RETRIES", "2"))
 
     # ── Neo4j Settings ──
     NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
