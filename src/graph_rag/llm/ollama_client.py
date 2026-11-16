@@ -29,7 +29,7 @@ class OllamaClient:
         self.base_url = base_url or settings.OLLAMA_BASE_URL
         self.llm_model = llm_model or settings.OLLAMA_LLM_MODEL
         self.embed_model = embed_model or settings.OLLAMA_EMBED_MODEL
-        self.client = ollama.Client(host=self.base_url, timeout=60.0)
+        self.client = ollama.Client(host=self.base_url, timeout=180.0)
 
     def is_available(self) -> bool:
         """Check if Ollama server is running and accessible."""

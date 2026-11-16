@@ -6,6 +6,7 @@ Maintains context window boundaries (~1000 tokens with ~150 token overlap).
 """
 
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 from graph_rag.config import settings
@@ -112,5 +113,5 @@ class TextChunker:
         return chunks
 
 
-from pathlib import Path
+
 chunker = TextChunker()

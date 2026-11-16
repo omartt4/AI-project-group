@@ -27,6 +27,7 @@ from graph_rag.ingestion.chunker import chunker
 from graph_rag.ingestion.dedup_checker import compute_hash, dedup_checker
 from graph_rag.ingestion.file_handler import file_handler
 from graph_rag.ingestion.metadata_manager import metadata_manager
+from graph_rag.graph.entity_resolver import entity_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +135,21 @@ class IngestionPipeline:
                 )
 
                 # Extract entities from one representative chunk to keep batch ingestion bounded.
-                for c in chunks[:1]:
-                    graph_result = entity_extractor.extract(c.text, document_title=doc_title)
-                    self.graph_db.add_entities_and_relations(filename, graph_result)
+                for chunk in chunks:
+                    graph_result = entity_extractor.extract(
+                        chunk.text,
+                        document_title=doc_title,
+                    )
+
+                    self.graph_db.add_entities_and_relations(
+                        filename,
+                        graph_result,
+                    )
+
+                    entity_resolver.resolve_document_authors(
+                        document_name=filename,
+                        result=graph_result,
+                    )
                 if progress_callback:
                     progress_callback(idx, total_files, f"Updated Neo4j graph: {filename}")
 
@@ -249,8 +262,14 @@ class IngestionPipeline:
                 metadata={"topic": "User Upload", "source": "upload"},
             )
             for c in chunks[:3]:
-                graph_result = entity_extractor.extract(c.text, document_title=doc_title)
-                self.graph_db.add_entities_and_relations(filename, graph_result)
+                graph_result = entity_extractor.extract(
+                    c.text,
+                    document_title=doc_title,
+                )
+                self.graph_db.add_entities_and_relations(
+                    filename,
+                    graph_result,
+                )
 
             # Step 7: Append to metadata.csv
             new_meta_row = {
