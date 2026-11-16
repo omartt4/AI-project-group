@@ -38,6 +38,9 @@ class Settings:
     EVALUATION_MODEL: str = os.getenv(
         "OPENROUTER_EVAL_MODEL", _LEGACY_LLM_MODEL
     )
+    AUDIT_MODEL: str = os.getenv(
+        "OPENROUTER_AUDIT_MODEL", _LEGACY_LLM_MODEL
+    )
     EMBEDDING_MODEL: str = os.getenv("OPENROUTER_EMBED_MODEL", "")
     EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "0"))
     MODEL_TIMEOUT_SECONDS: float = float(os.getenv("MODEL_TIMEOUT_SECONDS", "120.0"))

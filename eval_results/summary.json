@@ -1,0 +1,26 @@
+{
+  "evaluation_date": "2026-11-16T23:49:34",
+  "dataset_id": "research-v2",
+  "sample_size_per_paper": 0,
+  "total_papers": 1,
+  "total_entities": 0,
+  "total_triples": 0,
+  "total_judgments": 0,
+  "extractor_model": "anthropic/claude-haiku-5.5",
+  "judge_model": "anthropic/claude-sonnet-5.5",
+  "audit_model": "google/gemini-2.5-flash",
+  "overall_metrics": {},
+  "per_paper_results": {
+    "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf": {
+      "paper_id": "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf",
+      "title": "END-TO-END SPEAKER DIARIZATION AS POST-PROCESSING",
+      "entity_count": 0,
+      "triple_count": 0,
+      "entity_grounding_pct": 0,
+      "duplicate_rate_pct": 0,
+      "orphan_rate_pct": 0
+    }
+  },
+  "relation_type_counts": {},
+  "relation_type_precision": {}
+}

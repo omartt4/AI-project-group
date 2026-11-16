@@ -1,0 +1,56 @@
+{
+  "shared_entities": [
+    {
+      "normalized_name": "adam optimizer",
+      "original_name": "Adam optimizer",
+      "paper_count": 2,
+      "papers": [
+        "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf",
+        "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf"
+      ]
+    },
+    {
+      "normalized_name": "confusion matrix",
+      "original_name": "Confusion matrix",
+      "paper_count": 2,
+      "papers": [
+        "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf",
+        "068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf"
+      ]
+    },
+    {
+      "normalized_name": "crossentropy",
+      "original_name": "Cross-entropy",
+      "paper_count": 2,
+      "papers": [
+        "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf",
+        "068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf"
+      ]
+    }
+  ],
+  "overlap_matrix": {
+    "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf__067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf": {
+      "paper1": "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf",
+      "paper2": "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf",
+      "jaccard": 0.0049,
+      "intersection": 1,
+      "union": 206
+    },
+    "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf__068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf": {
+      "paper1": "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing.pdf",
+      "paper2": "068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf",
+      "jaccard": 0.0,
+      "intersection": 0,
+      "union": 147
+    },
+    "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf__068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf": {
+      "paper1": "067_Computer_Vision_IAN_Combining_Generative_Adversarial_Networks_for_Imaginative_Face_Generation.pdf",
+      "paper2": "068_Machine_Learning_Design_Rule_Checking_with_a_CNN_Based_Feature_Extractor.pdf",
+      "jaccard": 0.0104,
+      "intersection": 2,
+      "union": 192
+    }
+  },
+  "entities_in_all_papers": [],
+  "total_papers": 3
+}
