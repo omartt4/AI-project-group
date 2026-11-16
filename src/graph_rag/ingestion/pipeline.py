@@ -11,6 +11,7 @@ Orchestrates full document ingestion with two core modes:
 """
 
 import logging
+import hashlib
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,10 +23,12 @@ from graph_rag.database.db import get_db_connection
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.entity_extractor import (
     ExtractedEntity,
+    ExtractedMention,
     ExtractedRelation,
     GraphExtractionResult,
     entity_extractor,
 )
+from graph_rag.graph.entity_resolution import PaperEntityRegistry
 from graph_rag.graph.graph_builder import graph_builder
 from graph_rag.ingestion.archive_handler import archive_handler
 from graph_rag.ingestion.chunker import chunker
@@ -119,7 +122,11 @@ class IngestionPipeline:
 
                 # 2. Parse text
                 parsed_doc = file_handler.parse(pdf_file, filename=filename)
-                doc_title = rec.get("title") or parsed_doc.title
+                extracted_metadata = None
+                if not rec.get("title") or not rec.get("topic"):
+                    extracted_metadata = extract_paper_metadata(parsed_doc)
+                doc_title = rec.get("title") or (extracted_metadata or {}).get("title") or parsed_doc.title
+                topic = rec.get("topic") or (extracted_metadata or {}).get("topic") or "Unclassified"
                 if progress_callback:
                     progress_callback(idx, total_files, f"Parsed: {filename}")
 
@@ -139,18 +146,32 @@ class IngestionPipeline:
                     document_name=filename,
                     title=doc_title,
                     metadata={
-                        "topic": rec.get("topic", "Research Paper"),
+                        "topic": topic,
                         "source": rec.get("source", "initial"),
                     },
                 )
+                self.graph_db.add_chunks(filename, chunks)
 
-                graph_result = self._extract_paper_graph(chunks, doc_title)
+                graph_result = self._extract_paper_graph(chunks, doc_title, filename)
                 self.graph_db.add_entities_and_relations(filename, graph_result)
                 if progress_callback:
                     progress_callback(idx, total_files, f"Updated Neo4j graph: {filename}")
 
-                # 6. Update metadata.csv
-                self.meta_mgr.mark_as_ingested(local_pdf=filename, file_hash=file_hash)
+                # 6. Update metadata.csv. A fresh corpus may not have a row yet.
+                if rec:
+                    self.meta_mgr.mark_as_ingested(local_pdf=filename, file_hash=file_hash)
+                else:
+                    self.meta_mgr.append_document({
+                        "topic": topic,
+                        "title": doc_title,
+                        "authors": (extracted_metadata or {}).get("authors", ""),
+                        "abstract": (extracted_metadata or {}).get("abstract", ""),
+                        "categories": (extracted_metadata or {}).get("categories", topic),
+                        "local_pdf": filename,
+                        "source": "initial",
+                        "file_hash": file_hash,
+                        "ingested_at": datetime.now(timezone.utc).isoformat(),
+                    })
 
                 results.append(
                     IngestionResult(
@@ -260,7 +281,8 @@ class IngestionPipeline:
                 title=doc_title,
                 metadata={"topic": topic, "source": "upload"},
             )
-            graph_result = self._extract_paper_graph(chunks, doc_title)
+            self.graph_db.add_chunks(filename, chunks)
+            graph_result = self._extract_paper_graph(chunks, doc_title, filename)
             self.graph_db.add_entities_and_relations(filename, graph_result)
 
             # Step 7: Append to metadata.csv
@@ -345,35 +367,65 @@ class IngestionPipeline:
             )
 
     @staticmethod
-    def _extract_paper_graph(chunks: List[Any], document_title: str) -> GraphExtractionResult:
-        """Extract and merge graph data from every chunk in a paper."""
-        entities: Dict[tuple[str, str], ExtractedEntity] = {}
-        relations: Dict[tuple[str, str, str], ExtractedRelation] = {}
+    def _extract_paper_graph(
+        chunks: List[Any],
+        document_title: str,
+        paper_id: str,
+    ) -> GraphExtractionResult:
+        """Extract in chunk order while carrying a conservative entity registry."""
+        registry = PaperEntityRegistry(paper_id=paper_id)
+        mentions: Dict[str, ExtractedMention] = {}
+        relations: Dict[tuple[str, str, str, str], ExtractedRelation] = {}
 
         for chunk in chunks:
-            result = entity_extractor.extract(chunk.text, document_title=document_title)
-            for entity in result.entities:
-                key = (entity.name.strip().casefold(), entity.category.strip().casefold())
-                if key not in entities or len(entity.description) > len(entities[key].description):
-                    entities[key] = entity
-            for relation in result.relations:
-                key = (
-                    relation.source.strip().casefold(),
-                    relation.target.strip().casefold(),
-                    relation.relation_type.strip().upper(),
-                )
-                if key not in relations or len(relation.description) > len(relations[key].description):
-                    relations[key] = relation
+            result = entity_extractor.extract(
+                chunk.text,
+                document_title=document_title,
+                chunk_id=chunk.chunk_id,
+                known_entities=registry.known_entities(),
+            )
 
-        entity_names = {entity.name.casefold() for entity in entities.values()}
-        merged_relations = [
-            relation
-            for relation in relations.values()
-            if relation.source.casefold() in entity_names and relation.target.casefold() in entity_names
-        ]
+            for entity in result.entities:
+                registry.register(entity)
+
+            for mention in result.mentions:
+                mention.chunk_id = chunk.chunk_id
+                mention.entity_id = registry.resolve(
+                    entity_id=mention.entity_id,
+                    name=mention.entity_name,
+                    category=mention.entity_category,
+                ) or ""
+                mention.mention_id = hashlib.sha256(
+                    f"{chunk.chunk_id}|{mention.text}|{mention.entity_id}|{mention.evidence}".encode("utf-8")
+                ).hexdigest()[:24]
+                mentions[mention.mention_id] = mention
+
+            for relation in result.relations:
+                relation.chunk_id = chunk.chunk_id
+                relation.source_entity_id = registry.resolve(
+                    entity_id=relation.source_entity_id,
+                    name=relation.source,
+                    category=relation.source_category,
+                ) or ""
+                relation.target_entity_id = registry.resolve(
+                    entity_id=relation.target_entity_id,
+                    name=relation.target,
+                    category=relation.target_category,
+                ) or ""
+                key = (
+                    relation.source_entity_id,
+                    relation.target_entity_id,
+                    relation.relation_type,
+                    hashlib.sha256(
+                        f"{chunk.chunk_id}|{relation.evidence}".encode("utf-8")
+                    ).hexdigest()[:16],
+                )
+                relations[key] = relation
+
         return GraphExtractionResult(
-            entities=list(entities.values()),
-            relations=merged_relations,
+            entities=list(registry.entities.values()),
+            mentions=list(mentions.values()),
+            relations=list(relations.values()),
         )
 
     # ── Mode B Helper: Archive Upload Handler ──

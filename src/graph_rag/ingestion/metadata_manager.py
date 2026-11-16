@@ -29,7 +29,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
     """Score broad research areas using document title and text."""
     content = f"{title} {text}".lower()
     return {
-        "NLP": sum(
+        "Natural Language Processing": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "natural language",
@@ -46,7 +46,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
                 "agent",
             )
         ),
-        "Computer_Vision": sum(
+        "Computer Vision": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "computer vision",
@@ -59,7 +59,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
                 "scene",
             )
         ),
-        "Machine_Learning": sum(
+        "Machine Learning": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "machine learning",
@@ -83,7 +83,7 @@ def infer_topics(title: str = "", text: str = "") -> str:
     scores = _topic_scores(title, text)
     highest = max(scores.values())
     if not highest:
-        return "Machine_Learning"
+        return "Unclassified"
     selected = [topic for topic, score in scores.items() if score >= highest * 0.5]
     return "; ".join(selected)
 

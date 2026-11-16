@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from graph_rag.ingestion.metadata_manager import infer_topics
 from graph_rag.ingestion.pdf_parser import ParsedDocument
-from graph_rag.llm.ollama_client import ollama_client
+from graph_rag.llm.model_client import extraction_model_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ Document text:
 {source_text}"""
 
     try:
-        response = ollama_client.generate(
+        response = extraction_model_client.generate(
             prompt,
             system_prompt="You are a precise academic metadata extraction assistant.",
             temperature=0.0,

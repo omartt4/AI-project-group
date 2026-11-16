@@ -1,5 +1,5 @@
 """
-Vector Store module using ChromaDB and Ollama nomic-embed-text embeddings.
+Vector Store module using ChromaDB and configurable cloud embeddings.
 
 Persists chunks and semantic vectors into local storage.
 Provides cosine similarity search and document collection management.
@@ -12,12 +12,9 @@ from chromadb.config import Settings as ChromaSettings
 
 from graph_rag.config import settings
 from graph_rag.ingestion.chunker import TextChunk
-from graph_rag.llm.ollama_client import ollama_client
+from graph_rag.llm.model_client import embedding_model_client
 
 logger = logging.getLogger(__name__)
-
-COLLECTION_NAME = "research_papers"
-
 
 class VectorStore:
     """Manages persistent ChromaDB vector storage and semantic retrieval."""
@@ -26,8 +23,12 @@ class VectorStore:
         self.persist_dir = str(persist_dir or settings.CHROMA_PERSIST_DIR)
         self.client = chromadb.PersistentClient(path=self.persist_dir)
         self.collection = self.client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
+            name=settings.CHROMA_COLLECTION_NAME,
+            metadata={
+                "hnsw:space": "cosine",
+                "embedding_model": settings.EMBEDDING_MODEL or "not-configured",
+                "schema_version": settings.GRAPH_SCHEMA_VERSION,
+            },
         )
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
@@ -56,10 +57,11 @@ class VectorStore:
             clean_meta["document_title"] = chunk.document_title
             clean_meta["page"] = chunk.page_number
             clean_meta["chunk_index"] = chunk.chunk_index
+            clean_meta["embedding_model"] = settings.EMBEDDING_MODEL
+            clean_meta["schema_version"] = settings.GRAPH_SCHEMA_VERSION
             metadatas.append(clean_meta)
 
-        # Batch embed using Ollama nomic-embed-text
-        embeddings = ollama_client.get_embeddings_batch(documents)
+        embeddings = embedding_model_client.get_embeddings_batch(documents)
 
         # Upsert into ChromaDB
         self.collection.upsert(
@@ -80,7 +82,7 @@ class VectorStore:
         Perform semantic similarity search for a query text.
         Returns a ranked list of matched chunks with scores and metadata.
         """
-        query_embedding = ollama_client.get_embedding(query)
+        query_embedding = embedding_model_client.get_embedding(query)
 
         results = self.collection.query(
             query_embeddings=[query_embedding],

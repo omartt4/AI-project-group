@@ -5,7 +5,7 @@ Coordinates:
 1. Query Classification (Factual, Comparative, Relational, Exploratory, Summary, Conversational)
 2. Dynamic Top-K & Diversity-Aware MMR Retrieval
 3. Knowledge Graph Concept & Bridge Discovery
-4. Intent-Specific LLM Synthesis (qwen2.5)
+4. Intent-Specific cloud LLM synthesis
 5. Stage Latency Instrumentation
 6. Real-Time RAG Evaluation (LLM-as-a-Judge)
 """
@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from graph_rag.config import settings
 from graph_rag.evaluation.eval_service import EvaluationRecord, eval_service
 from graph_rag.evaluation.latency_tracker import LatencyMetrics, StageTimer
-from graph_rag.llm.ollama_client import ollama_client
+from graph_rag.llm.model_client import chat_model_client
 from graph_rag.retriever.hybrid_retriever import hybrid_retriever
 from graph_rag.retriever.query_classifier import QueryClassification, QueryClass
 
@@ -50,7 +50,7 @@ Provide a thorough and scientifically rigorous explanation of the topic.
 Synthesize insights from the diverse research excerpts and discovered graph concepts.
 Ensure proper attribution to the papers and page numbers cited.""",
 
-    QueryClass.CONVERSATIONAL: """You are Graph RAG Studio, a scientific AI research assistant powered by local Ollama models, ChromaDB, and Neo4j.
+    QueryClass.CONVERSATIONAL: """You are Graph RAG Studio, a scientific AI research assistant powered by cloud models, ChromaDB, and Neo4j.
 Respond helpfully, politely, and concisely. If the user asks what you can do, briefly explain that you can answer questions, compare techniques, trace knowledge graph relationships, and synthesize insights across the research paper library.""",
 }
 
@@ -98,7 +98,7 @@ class QueryEngine:
 
     def __init__(self) -> None:
         self.retriever = hybrid_retriever
-        self.llm = ollama_client
+        self.llm = chat_model_client
         self.eval = eval_service
 
     def query(
@@ -149,7 +149,7 @@ class QueryEngine:
                 )
             except Exception as e:
                 logger.error(f"LLM Generation failed: {e}")
-                answer = f"I encountered an error generating an answer: {e}. Please ensure Ollama is running."
+                answer = f"I encountered an error generating an answer: {e}. Please verify the cloud model configuration."
         latency.generation_ms = gen_timer.elapsed_ms
 
         logger.info(

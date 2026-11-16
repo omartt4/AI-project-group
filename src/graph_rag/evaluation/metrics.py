@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from typing import List, Tuple
-from graph_rag.llm.ollama_client import ollama_client
+from graph_rag.llm.model_client import evaluation_model_client
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def evaluate_faithfulness(question: str, answer: str, context: str) -> Tuple[flo
     """Score faithfulness (grounding) of the answer against context."""
     prompt = FAITHFULNESS_PROMPT.format(question=question, answer=answer, context=context[:2500])
     try:
-        raw = ollama_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
+        raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
         return _parse_judge_response(raw, default_score=0.9)
     except Exception as e:
         logger.warning(f"Faithfulness eval failed: {e}")
@@ -94,7 +94,7 @@ def evaluate_answer_relevance(question: str, answer: str) -> Tuple[float, str]:
     """Score answer relevance to the user question."""
     prompt = ANSWER_RELEVANCE_PROMPT.format(question=question, answer=answer)
     try:
-        raw = ollama_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
+        raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
         return _parse_judge_response(raw, default_score=0.9)
     except Exception as e:
         logger.warning(f"Answer relevance eval failed: {e}")
@@ -105,7 +105,7 @@ def evaluate_context_relevance(question: str, context: str) -> Tuple[float, str]
     """Score relevance of retrieved context to the question."""
     prompt = CONTEXT_RELEVANCE_PROMPT.format(question=question, context=context[:2500])
     try:
-        raw = ollama_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
+        raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
         return _parse_judge_response(raw, default_score=0.85)
     except Exception as e:
         logger.warning(f"Context relevance eval failed: {e}")

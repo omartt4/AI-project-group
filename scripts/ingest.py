@@ -40,6 +40,12 @@ def main() -> None:
     print(f"PDF Directory:    {settings.PDF_DIR}")
     print(f"Metadata File:    {settings.METADATA_FILE}")
     print(f"ChromaDB Path:    {settings.CHROMA_PERSIST_DIR}")
+    print(f"Chroma Collection:{settings.CHROMA_COLLECTION_NAME}")
+    print(f"Dataset ID:       {settings.DATASET_ID}")
+    print(f"Extraction Model: {settings.EXTRACTION_MODEL or '[NOT CONFIGURED]'}")
+    print(f"Chat Model:       {settings.CHAT_MODEL or '[NOT CONFIGURED]'}")
+    print(f"Evaluation Model: {settings.EVALUATION_MODEL or '[NOT CONFIGURED]'}")
+    print(f"Embedding Model:  {settings.EMBEDDING_MODEL or '[NOT CONFIGURED]'}")
     print(f"Neo4j URI:        {settings.NEO4J_URI}")
     print("=" * 65)
 
@@ -72,7 +78,10 @@ def main() -> None:
     print(f"  - Total chunks in ChromaDB: {vector_store.get_total_chunks()}")
     if neo4j_online:
         stats = graph_builder.get_graph_stats()
-        print(f"  - Neo4j graph nodes: {stats.get('nodes', 0)}, edges: {stats.get('edges', 0)}")
+        print(
+            f"  - Neo4j graph nodes: {stats.get('nodes', 0)}, "
+            f"edges: {stats.get('edges', 0)}, topics: {stats.get('topics', 0)}"
+        )
     print("=" * 65)
 
 
