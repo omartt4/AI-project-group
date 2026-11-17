@@ -219,6 +219,13 @@ def test_paper_level_extraction_cache() -> None:
         object.__setattr__(settings, "EXTRACTION_CACHE_DIR", original_cache_dir)
 
 
+def test_graph_rebuild_repairs_missing_vectors() -> None:
+    assert IngestionPipeline._needs_vector_write(False, 0)
+    assert IngestionPipeline._needs_vector_write(False, 5)
+    assert IngestionPipeline._needs_vector_write(True, 0)
+    assert not IngestionPipeline._needs_vector_write(True, 5)
+
+
 def test_dynamic_entity_cypher_is_renderable() -> None:
     """Execute the dynamic label path so f-string Cypher maps cannot regress."""
 
@@ -346,6 +353,7 @@ if __name__ == "__main__":
     test_cloud_client_contract()
     test_role_specific_model_routing()
     test_paper_level_extraction_cache()
+    test_graph_rebuild_repairs_missing_vectors()
     test_dynamic_entity_cypher_is_renderable()
     test_compact_graph_write_policy()
     print("Graph redesign tests passed")

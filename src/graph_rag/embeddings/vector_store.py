@@ -115,6 +115,14 @@ class VectorStore:
         """Return total number of chunks currently stored in ChromaDB."""
         return self.collection.count()
 
+    def get_document_chunk_count(self, document_name: str) -> int:
+        """Return stored chunk count for one exact document filename."""
+        rows = self.collection.get(
+            where={"document_name": document_name},
+            include=[],
+        )
+        return len(rows.get("ids") or [])
+
     def delete_document_chunks(self, document_name: str) -> None:
         """Delete all chunks belonging to a specific document."""
         self.collection.delete(where={"document_name": document_name})

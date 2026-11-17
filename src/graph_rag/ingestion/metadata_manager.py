@@ -267,6 +267,17 @@ class MetadataManager:
                 df.loc[mask, "ingested_at"] = datetime.now(timezone.utc).isoformat()
                 df.to_csv(self.metadata_path, index=False)
 
+    def remove_document(self, local_pdf: str) -> int:
+        """Remove metadata rows for one exact local filename."""
+        with _csv_lock:
+            df = self.load_metadata()
+            target_name = Path(local_pdf).name.strip().lower()
+            mask = df["local_pdf"].astype(str).str.strip().str.lower() == target_name
+            removed = int(mask.sum())
+            if removed:
+                df.loc[~mask].to_csv(self.metadata_path, index=False)
+            return removed
+
     def get_document_count(self) -> int:
         """Return total count of documents registered."""
         df = self.load_metadata()

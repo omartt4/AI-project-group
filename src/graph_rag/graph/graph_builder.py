@@ -493,6 +493,29 @@ class GraphBuilder:
         except Exception as exc:
             self._mark_offline(exc)
 
+    def delete_document(self, document_name: str) -> bool:
+        """Delete one paper and only the graph evidence that depends on it."""
+        if not self.get_driver():
+            return False
+        self.clear_paper_evidence(document_name)
+        driver = self.get_driver()
+        if not driver:
+            return False
+        try:
+            with driver.session() as session:
+                session.run(
+                    """
+                    MATCH (p:Paper {uid: $paper_uid, dataset_id: $dataset_id})
+                    DETACH DELETE p
+                    """,
+                    paper_uid=self._uid(document_name),
+                    dataset_id=self.dataset_id,
+                ).consume()
+            return True
+        except Exception as exc:
+            self._mark_offline(exc)
+            return False
+
     def add_entities_and_relations(
         self,
         document_name: str,

@@ -70,6 +70,7 @@ class IngestionPipeline:
         folder_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         limit: Optional[int] = None,
+        only_filename: Optional[str] = None,
         rebuild_graph: bool = False,
         refresh_extraction: bool = False,
     ) -> List[IngestionResult]:
@@ -79,6 +80,13 @@ class IngestionPipeline:
         """
         folder = folder_path or settings.PDF_DIR
         pdf_files = sorted(list(folder.glob("*.pdf")))
+        if only_filename:
+            requested = Path(only_filename).name.casefold()
+            pdf_files = [path for path in pdf_files if path.name.casefold() == requested]
+            if not pdf_files:
+                raise FileNotFoundError(
+                    f"PDF not found in {folder}: {Path(only_filename).name}"
+                )
         if limit and limit > 0:
             pdf_files = pdf_files[:limit]
         total_files = len(pdf_files)
@@ -147,12 +155,20 @@ class IngestionPipeline:
                     refresh_extraction=refresh_extraction,
                 )
 
-                # 5. Store in ChromaDB only after extraction succeeds, unless
-                # this is a graph-only rebuild.
-                if not rebuild_graph:
+                # 5. A graph rebuild normally reuses existing vectors. If a
+                # new/partially failed document has no vectors, repair them
+                # automatically instead of leaving it invisible to retrieval.
+                existing_vector_chunks = self.vector_db.get_document_chunk_count(filename)
+                if self._needs_vector_write(rebuild_graph, existing_vector_chunks):
                     self.vector_db.add_chunks(chunks)
                     if progress_callback:
                         progress_callback(idx, total_files, f"Embedded and stored {len(chunks)} chunks: {filename}")
+                elif progress_callback:
+                    progress_callback(
+                        idx,
+                        total_files,
+                        f"Reused {existing_vector_chunks} existing vector chunks: {filename}",
+                    )
 
                 # 6. Populate Neo4j only after extraction succeeds, so a failed
                 # model request cannot leave a paper marked as completed.
@@ -223,6 +239,11 @@ class IngestionPipeline:
                     break
 
         return results
+
+    @staticmethod
+    def _needs_vector_write(rebuild_graph: bool, existing_chunk_count: int) -> bool:
+        """Write vectors for normal ingestion or repair a missing rebuild entry."""
+        return not rebuild_graph or existing_chunk_count == 0
 
     # ── Mode B: Dynamic User Upload Ingestion ──
     def ingest_uploaded_file(

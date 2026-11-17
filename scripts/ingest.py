@@ -30,6 +30,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Graph RAG Ingestion CLI")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of PDFs to process")
     parser.add_argument(
+        "--file",
+        dest="only_filename",
+        default=None,
+        help="Process one exact PDF filename from the configured pdfs folder",
+    )
+    parser.add_argument(
         "--rebuild-graph",
         action="store_true",
         help="Rebuild Neo4j from cached extraction without duplicating embeddings",
@@ -70,6 +76,7 @@ def main() -> None:
     results = pipeline.ingest_batch_folder(
         progress_callback=progress_callback,
         limit=args.limit,
+        only_filename=args.only_filename,
         rebuild_graph=args.rebuild_graph,
         refresh_extraction=args.refresh_extraction,
     )
