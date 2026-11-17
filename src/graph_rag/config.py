@@ -63,13 +63,21 @@ class Settings:
     )
     SQLITE_DB_PATH: Path = PROJECT_ROOT / os.getenv("SQLITE_DB_PATH", "data/graph_rag.db")
     UPLOAD_TEMP_DIR: Path = PROJECT_ROOT / os.getenv("UPLOAD_TEMP_DIR", "data/temp_uploads")
+    EXTRACTION_CACHE_DIR: Path = PROJECT_ROOT / os.getenv(
+        "EXTRACTION_CACHE_DIR", "data/extraction_cache"
+    )
 
     # ── Ingestion & Document Processing ──
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "150"))
+    GRAPH_EXTRACTION_MAX_CHARS: int = int(
+        os.getenv("GRAPH_EXTRACTION_MAX_CHARS", "14000")
+    )
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
-    GRAPH_SCHEMA_VERSION: str = os.getenv("GRAPH_SCHEMA_VERSION", "2")
-    EXTRACTION_VERSION: str = os.getenv("EXTRACTION_VERSION", "graph-v2")
+    GRAPH_SCHEMA_VERSION: str = os.getenv("GRAPH_SCHEMA_VERSION", "3")
+    EXTRACTION_VERSION: str = os.getenv(
+        "EXTRACTION_VERSION", "graph-v3-paper-level"
+    )
     DATASET_ID: str = os.getenv("DATASET_ID", "research-v2")
 
     # ── JWT Authentication ──
@@ -78,7 +86,7 @@ class Settings:
     JWT_EXPIRY_HOURS: int = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
 
     # ── RAG Evaluation ──
-    RAG_EVAL_ENABLED: bool = os.getenv("RAG_EVAL_ENABLED", "true").lower() in ("true", "1", "yes")
+    RAG_EVAL_ENABLED: bool = os.getenv("RAG_EVAL_ENABLED", "false").lower() in ("true", "1", "yes")
 
     # ── App & Logging ──
     APP_HOST: str = os.getenv("APP_HOST", "localhost")
@@ -91,6 +99,7 @@ class Settings:
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
         self.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        self.EXTRACTION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         self.PDF_DIR.mkdir(parents=True, exist_ok=True)
 

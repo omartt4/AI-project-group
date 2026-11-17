@@ -12,6 +12,7 @@ from graph_rag.chat.chat_service import chat_service
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.graph_builder import graph_builder
 from graph_rag.ingestion.metadata_manager import metadata_manager
+from graph_rag.llm.cost_tracker import cost_tracker
 
 CUSTOM_CSS = """
 <style>
@@ -196,9 +197,51 @@ def render_sidebar() -> None:
         st.markdown(f"📄 **{doc_count}** Indexed Papers")
         st.markdown(f"🧩 **{chunk_count}** Vector Chunks")
         if neo4j_stats.get("status") == "online":
-            st.markdown(f"🕸️ **{neo4j_stats.get('nodes', 0)}** Graph Entities")
+            st.markdown(f"🕸️ **{neo4j_stats.get('nodes', 0)}** Total Graph Nodes")
+            st.caption(
+                f"{neo4j_stats.get('core_entities', 0)} core entities · "
+                f"{neo4j_stats.get('mentions', 0)} evidence links · "
+                f"{neo4j_stats.get('topics', 0)} top-level topics · "
+                f"{neo4j_stats.get('subtopics', 0)} subtopics"
+            )
         else:
             st.caption("🕸️ Neo4j Graph (Offline)")
+
+        usage = cost_tracker.summary()
+        st.markdown(f"💵 **${usage['cost_usd']:.6f}** Tracked API Cost")
+        st.caption(
+            f"{usage['requests']} successful requests · "
+            f"{usage['total_tokens']:,} tokens"
+        )
+        if usage["unknown_cost_requests"]:
+            st.caption(
+                f"⚠️ {usage['unknown_cost_requests']} request(s) returned tokens "
+                "without a provider cost; the dollar total excludes them."
+            )
+        if usage["breakdown"]:
+            with st.expander("Cost by operation", expanded=False):
+                for row in usage["breakdown"]:
+                    st.write(
+                        f"{row['role']}: ${float(row['cost_usd']):.6f} "
+                        f"· {int(row['requests'])} requests "
+                        f"· {int(row['total_tokens']):,} tokens"
+                    )
+                    if int(row["unknown_cost_requests"]):
+                        st.caption(
+                            f"{int(row['unknown_cost_requests'])} {row['role']} "
+                            "request(s) have unknown cost"
+                        )
+                st.caption("Recent successful requests")
+                for row in cost_tracker.recent(limit=8):
+                    cost_label = (
+                        f"${float(row['cost_usd']):.6f}"
+                        if row["cost_usd"] is not None
+                        else "cost unknown"
+                    )
+                    st.write(
+                        f"{row['role']} · {row['model']} · "
+                        f"{int(row['total_tokens']):,} tokens · {cost_label}"
+                    )
 
         st.divider()
 

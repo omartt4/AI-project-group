@@ -11,12 +11,26 @@ from graph_rag.graph.entity_extractor import ExtractedEntity
 from graph_rag.graph.topic_taxonomy import topic_taxonomy
 
 
-GLOBAL_NAME_CATEGORIES = {"Method", "Dataset", "Topic", "Metric", "Task"}
+GLOBAL_NAME_CATEGORIES = {"Method", "Dataset", "Topic", "Metric", "Task", "Tool"}
+
+_TRAILING_ALIAS = re.compile(r"^(?P<name>.+?)\s*\((?P<alias>[A-Za-z][A-Za-z0-9-]{1,11})\)\s*$")
 
 
 def normalize_entity_name(value: str) -> str:
     text = unicodedata.normalize("NFKC", value or "").casefold().strip()
     return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip()
+
+
+def canonicalize_entity(entity: ExtractedEntity) -> ExtractedEntity:
+    """Move a trailing acronym into aliases so common name variants share one ID."""
+    match = _TRAILING_ALIAS.match(entity.name.strip())
+    if not match:
+        return entity
+    canonical = match.group("name").strip()
+    alias = match.group("alias").strip()
+    entity.aliases = sorted(set([*entity.aliases, alias, entity.name]))
+    entity.name = canonical
+    return entity
 
 
 class PaperEntityRegistry:
@@ -31,7 +45,7 @@ class PaperEntityRegistry:
         category = entity.category.strip().title()
         name = normalize_entity_name(entity.name)
         if category == "Topic":
-            assignment = topic_taxonomy.assign(entity.name, source="extraction")[0]
+            assignment = topic_taxonomy.identity_for_entity(entity.name)
             return f"topic:{assignment.key}"
         scope = "global" if category in GLOBAL_NAME_CATEGORIES else self.paper_id
         disambiguator = ""
@@ -43,6 +57,7 @@ class PaperEntityRegistry:
         return f"ent-{digest}"
 
     def register(self, entity: ExtractedEntity) -> ExtractedEntity:
+        entity = canonicalize_entity(entity)
         if entity.entity_id and entity.entity_id in self.entities:
             current = self.entities[entity.entity_id]
             self._merge(current, entity)
@@ -63,6 +78,18 @@ class PaperEntityRegistry:
             self._merge(self.entities[entity.entity_id], entity)
             return self.entities[entity.entity_id]
 
+        self.entities[entity.entity_id] = entity
+        self._index(entity)
+        return entity
+
+    def seed(self, entity: ExtractedEntity) -> ExtractedEntity:
+        """Trust one canonical entity loaded from the existing graph."""
+        if not entity.entity_id:
+            return self.register(entity)
+        current = self.entities.get(entity.entity_id)
+        if current:
+            self._merge(current, entity)
+            return current
         self.entities[entity.entity_id] = entity
         self._index(entity)
         return entity

@@ -11,7 +11,8 @@ The redesign has four goals:
 ## Target schema
 
 ```text
-(Topic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
+(TopLevelTopic)-[:HAS_SUBTOPIC]->(Subtopic)
+(TopLevelTopic|Subtopic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
 (Chunk)-[:CONTAINS_MENTION]->(Mention)-[:REFERS_TO]->(Entity)
 (Entity)-[:USES_METHOD|EVALUATES_ON|AFFILIATED_WITH|HOLDS_ROLE|...]->(Entity)
 ```
@@ -32,12 +33,13 @@ solely because it encountered a role phrase.
 
 ## Topic taxonomy
 
-Machine Learning, Computer Vision, and Natural Language Processing are seed
-topics, not a closed list. Known aliases map deterministically to the seeds.
-Unknown topics are stored as `candidate` topics with their source and confidence
-so they can be reviewed and promoted without changing code.
+Machine Learning, Computer Vision, and Natural Language Processing are active
+top-level seed topics. Known aliases map deterministically to those parents.
+Specialist areas are stored as `Subtopic` nodes connected through
+`HAS_SUBTOPIC`; genuinely new domains remain candidate top-level topics so the
+taxonomy can grow without changing code.
 
-Papers may belong to more than one topic.
+Papers and subtopics may belong to more than one top-level topic.
 
 ## Model providers
 

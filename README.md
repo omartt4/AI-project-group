@@ -14,7 +14,7 @@
   - **Structured Evidence Aggregation**: Fuses MMR vector excerpts, graph pathways, and cross-references into an attributed context payload.
   - **Adaptive LLM Synthesis**: Tailors cloud-model prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
 - **Task-Specific Cloud Models**: Extraction, answer generation, evaluation, and embeddings each use an explicit OpenRouter model selected in `.env`; credentials are never committed.
-- **Evidence-First Graph**: Topics, papers, chunks, mentions, and canonical entities are separate graph objects. Every semantic relation keeps its paper, chunk, evidence, confidence, and extraction version.
+- **Evidence-First Graph**: Top-level topics, subtopics, papers, chunks, mentions, and canonical entities are separate graph objects. Every semantic relation keeps its paper, chunk, evidence, confidence, and extraction version.
 - **Dual Data Sources**:
   1. **Initial Repository**: The current research corpus placed in the `pdfs/` folder.
   2. **Dynamic UI Uploads**: Users can upload new papers directly in the Streamlit UI.
@@ -298,6 +298,10 @@ or running paid inference:
 ```bash
 uv run python scripts/test_connections.py
 ```
+To make minimal paid calls that also verify credits and model permissions:
+```bash
+uv run python scripts/test_connections.py --deep
+```
 
 ### 8. Run Batch Ingestion (Initial Papers)
 To index the papers located in `pdfs/`:
@@ -305,6 +309,24 @@ To index the papers located in `pdfs/`:
 uv run python scripts/ingest.py
 ```
 *Tip: If you rerun this command, it checks `metadata.csv` and skips papers already ingested.*
+
+Graph extraction now runs once per paper and is cached under
+`data/extraction_cache/`. A graph rebuild reuses that cache and does not call
+the extraction model again:
+```bash
+uv run python scripts/ingest.py --limit 3 --rebuild-graph
+```
+Only use `--refresh-extraction` when a deliberately fresh paid extraction is
+required. The CLI prints the tokens and OpenRouter-reported USD cost for every
+run, split by extraction and embedding. Chat and evaluation costs are shown in
+the application sidebar. Live evaluation is disabled by default during
+development to avoid extra judge-model calls.
+
+To migrate existing paper metadata to the hierarchical Top-level Topic →
+Subtopic model without re-embedding documents or calling an LLM:
+```bash
+uv run python scripts/rebuild_topic_hierarchy.py
+```
 
 ### 9. Launch the Streamlit Web Application
 Start the interactive UI directly from the project root:
@@ -367,7 +389,7 @@ graph-rag/
     ├── graph/
     │   ├── entity_extractor.py   # Evidence-first entity/mention extraction
     │   ├── entity_resolution.py  # Conservative paper-level identity registry
-    │   ├── topic_taxonomy.py     # Seed aliases + extensible candidate topics
+    │   ├── topic_taxonomy.py     # Top-level topics + hierarchical subtopics
     │   ├── graph_builder.py      # Neo4j driver & node/edge creator
     │   ├── graph_queries.py      # Cypher multi-hop query helpers
     │   └── concept_discovery.py  # Concept neighborhood, bridge & hub engine

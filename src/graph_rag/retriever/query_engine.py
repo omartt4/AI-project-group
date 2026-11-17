@@ -141,6 +141,7 @@ class QueryEngine:
         )
 
         with StageTimer() as gen_timer:
+            generation_succeeded = True
             try:
                 answer = self.llm.generate(
                     prompt=user_prompt,
@@ -149,6 +150,7 @@ class QueryEngine:
                 )
             except Exception as e:
                 logger.error(f"LLM Generation failed: {e}")
+                generation_succeeded = False
                 answer = f"I encountered an error generating an answer: {e}. Please verify the cloud model configuration."
         latency.generation_ms = gen_timer.elapsed_ms
 
@@ -162,6 +164,7 @@ class QueryEngine:
         eval_record = None
         should_evaluate = (
             run_evaluation
+            and generation_succeeded
             and settings.RAG_EVAL_ENABLED
             and (not qc or qc.query_class != QueryClass.CONVERSATIONAL)
         )

@@ -2,13 +2,16 @@
 
 Usage:
     uv run python scripts/test_connections.py
+    uv run python scripts/test_connections.py --deep
 
 The OpenRouter checks only list available models. They do not run inference or
-create embeddings. The Neo4j check runs a read-only ``RETURN 1`` query.
+create embeddings unless ``--deep`` is supplied. The Neo4j check runs a
+read-only ``RETURN 1`` query.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Iterable, Set
@@ -22,6 +25,14 @@ if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
 from graph_rag.config import settings
+from graph_rag.database.db import init_db
+from graph_rag.llm.model_client import (
+    chat_model_client,
+    embedding_model_client,
+    evaluation_model_client,
+    extraction_model_client,
+)
+from graph_rag.llm.cost_tracker import cost_tracker
 
 
 def _model_ids(path: str) -> Set[str]:
@@ -97,6 +108,29 @@ def check_openrouter() -> bool:
     return chat_ok and embedding_ok
 
 
+def check_inference() -> bool:
+    """Run one minimal paid request per unique configured model."""
+    print("\nOpenRouter deep inference check")
+    print("-------------------------------")
+    unique_chat_models = {}
+    for role, client in (
+        ("extraction", extraction_model_client),
+        ("chat", chat_model_client),
+        ("evaluation", evaluation_model_client),
+    ):
+        unique_chat_models.setdefault(client.llm_model, (role, client))
+    try:
+        for model, (role, client) in unique_chat_models.items():
+            client.generate("Reply with OK only.", temperature=0.0)
+            print(f"[OK]   inference: {model} ({role})")
+        embedding_model_client.get_embedding("connection test")
+        print(f"[OK]   embedding inference: {settings.EMBEDDING_MODEL}")
+        return True
+    except Exception as exc:
+        print(f"[FAIL] Paid inference request failed: {exc}")
+        return False
+
+
 def check_neo4j() -> bool:
     """Verify Neo4j credentials with a read-only query."""
     print("\nNeo4j")
@@ -130,8 +164,29 @@ def check_neo4j() -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Make minimal paid inference calls to verify credits and permissions",
+    )
+    args = parser.parse_args()
+    init_db()
     print("Connection checks only - no PDFs will be processed.")
     openrouter_ok = check_openrouter()
+    if openrouter_ok and args.deep:
+        usage_start_id = cost_tracker.last_id()
+        openrouter_ok = check_inference()
+        usage = cost_tracker.summary(since_id=usage_start_id)
+        print(
+            f"Deep-check cost: ${usage['cost_usd']:.6f} "
+            f"({usage['requests']} requests, {usage['total_tokens']} tokens)"
+        )
+        if usage["unknown_cost_requests"]:
+            print(
+                f"WARNING: {usage['unknown_cost_requests']} request(s) returned "
+                "no provider cost; the total excludes them."
+            )
     neo4j_ok = check_neo4j()
 
     print("\nResult")

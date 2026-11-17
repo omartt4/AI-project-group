@@ -81,12 +81,28 @@ CREATE TABLE IF NOT EXISTS uploaded_documents (
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ── Per-request OpenRouter Usage & Cost ──
+CREATE TABLE IF NOT EXISTS model_usage (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    role                TEXT NOT NULL,
+    operation           TEXT NOT NULL,
+    model               TEXT NOT NULL,
+    endpoint            TEXT NOT NULL,
+    prompt_tokens       INTEGER DEFAULT 0,
+    completion_tokens   INTEGER DEFAULT 0,
+    total_tokens        INTEGER DEFAULT 0,
+    cost_usd            REAL DEFAULT 0.0,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ── Indexes for Fast Lookups ──
 CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_eval_session ON evaluation_logs(session_id);
 CREATE INDEX IF NOT EXISTS idx_eval_created ON evaluation_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_uploads_hash ON uploaded_documents(file_hash);
+CREATE INDEX IF NOT EXISTS idx_model_usage_created ON model_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_model_usage_role ON model_usage(role);
 """
 
 

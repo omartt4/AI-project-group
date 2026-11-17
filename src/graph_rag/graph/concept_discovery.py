@@ -149,10 +149,13 @@ class ConceptDiscoveryEngine:
         MATCH (e:Entity)
         WHERE e.dataset_id = $dataset_id
           AND toLower(e.name) CONTAINS toLower($kw)
-        OPTIONAL MATCH (e)-[r]-(neighbor:Entity)
-        WHERE neighbor IS NULL OR neighbor.dataset_id = $dataset_id
+        OPTIONAL MATCH (e)-[r]-(neighbor)
+        WHERE neighbor IS NULL OR (
+            neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
+        )
         RETURN e.name AS e_name, e.category AS e_cat, e.description AS e_desc,
-               type(r) AS rel, neighbor.name AS n_name, neighbor.category AS n_cat,
+               type(r) AS rel, coalesce(neighbor.name, neighbor.title) AS n_name,
+               CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS n_cat,
                neighbor.description AS n_desc
         LIMIT $limit
         """

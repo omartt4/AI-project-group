@@ -4,17 +4,22 @@ These checks do not call OpenRouter, ChromaDB, or Neo4j.
 """
 
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_SRC = PROJECT_ROOT / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-from graph_rag.graph.entity_extractor import EntityExtractor, ExtractedEntity
+from graph_rag.graph.entity_extractor import EntityExtractor, ExtractedEntity, GraphExtractionResult
 from graph_rag.graph.entity_resolution import PaperEntityRegistry
+from graph_rag.graph.graph_builder import GraphBuilder
 from graph_rag.graph.topic_taxonomy import topic_taxonomy
 from graph_rag.config import settings
+import graph_rag.ingestion.pipeline as pipeline_module
+from graph_rag.ingestion.pipeline import IngestionPipeline
 from graph_rag.llm.model_client import (
     CloudModelClient,
     chat_model_client,
@@ -63,10 +68,27 @@ class FakeCloudClient(CloudModelClient):
 
 
 def test_topics() -> None:
-    assignments = topic_taxonomy.assign("NLP; Medical Informatics")
+    assignments = topic_taxonomy.assign(
+        "NLP; Medical Informatics; Speaker Diarization"
+    )
     by_name = {item.name: item for item in assignments}
     assert by_name["Natural Language Processing"].status == "active"
+    assert by_name["Natural Language Processing"].level == "top_level"
     assert by_name["Medical Informatics"].status == "candidate"
+    assert by_name["Medical Informatics"].level == "subtopic"
+    assert by_name["Medical Informatics"].parent_names == (
+        "Natural Language Processing",
+    )
+    assert by_name["Speaker Diarization"].level == "subtopic"
+    assert by_name["Speaker Diarization"].parent_names == (
+        "Natural Language Processing",
+    )
+
+    vision = topic_taxonomy.assign("Computer Vision; Generative Models")
+    vision_by_name = {item.name: item for item in vision}
+    assert vision_by_name["Generative Models"].parent_names == (
+        "Computer Vision",
+    )
 
 
 def test_mentions_and_resolution() -> None:
@@ -87,6 +109,28 @@ def test_mentions_and_resolution() -> None:
     assert ahmed_id
     assert registry.resolve(name="the CEO", category="Person") is None
     assert registry.resolve(entity_id=ahmed_id) == ahmed_id
+
+
+def test_quality_filter_and_alias_merge() -> None:
+    extractor = EntityExtractor(client=FakeModelClient())
+    noisy = """{
+      "entities": [
+        {"name": "Zhu et al.", "category": "Person"},
+        {"name": "Table 3 K values", "category": "Metric"},
+        {"name": "Accuracy", "category": "Metric"},
+        {"name": "Spiders", "category": "Topic"},
+        {"name": "Diarization error rate (DER)", "category": "Metric"},
+        {"name": "K-GAN", "category": "Method"}
+      ], "mentions": [], "relations": []
+    }"""
+    result = extractor._parse_json_response(noisy)
+    assert [entity.name for entity in result.entities] == ["K-GAN"]
+
+    registry = PaperEntityRegistry("paper-aliases")
+    first = registry.register(ExtractedEntity("Feature Matching", "Method"))
+    second = registry.register(ExtractedEntity("Feature Matching (FM)", "Method"))
+    assert first.entity_id == second.entity_id
+    assert "FM" in first.aliases
 
 
 def test_same_name_is_scoped_conservatively() -> None:
@@ -131,11 +175,178 @@ def test_role_specific_model_routing() -> None:
     assert not embedding_model_client.llm_model
 
 
+def test_paper_level_extraction_cache() -> None:
+    class CountingExtractor:
+        calls = 0
+
+        def extract(self, *args, **kwargs):
+            self.calls += 1
+            return GraphExtractionResult(
+                entities=[ExtractedEntity(name="K-GAN", category="Method")]
+            )
+
+    fake = CountingExtractor()
+    original_extractor = pipeline_module.entity_extractor
+    original_cache_dir = settings.EXTRACTION_CACHE_DIR
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.graph_db = SimpleNamespace(find_person_by_role=lambda *args: None)
+    chunks = [
+        SimpleNamespace(
+            text="Abstract. We propose the K-GAN method and evaluate the approach.",
+            chunk_index=0,
+            page_number=1,
+        ),
+        SimpleNamespace(
+            text="References\n[1] unrelated cited work",
+            chunk_index=1,
+            page_number=2,
+        ),
+    ]
+    try:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "data") as tmp:
+            object.__setattr__(settings, "EXTRACTION_CACHE_DIR", Path(tmp))
+            pipeline_module.entity_extractor = fake
+            first = pipeline._extract_paper_graph(
+                chunks, "K-GAN Paper", "paper.pdf", file_hash="hash-1"
+            )
+            second = pipeline._extract_paper_graph(
+                chunks, "K-GAN Paper", "paper.pdf", file_hash="hash-1"
+            )
+            assert fake.calls == 1, "A rebuild must reuse the paid extraction cache"
+            assert first.entities[0].entity_id == second.entities[0].entity_id
+    finally:
+        pipeline_module.entity_extractor = original_extractor
+        object.__setattr__(settings, "EXTRACTION_CACHE_DIR", original_cache_dir)
+
+
+def test_dynamic_entity_cypher_is_renderable() -> None:
+    """Execute the dynamic label path so f-string Cypher maps cannot regress."""
+
+    class FakeResult:
+        def consume(self):
+            return self
+
+        def single(self):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def run(self, query, **params):
+            self.queries.append(query)
+            return FakeResult()
+
+    class FakeDriver:
+        def __init__(self):
+            self.fake_session = FakeSession()
+
+        def session(self):
+            return self.fake_session
+
+    builder = GraphBuilder()
+    driver = FakeDriver()
+    builder._driver = driver
+    result = GraphExtractionResult(
+        entities=[
+            ExtractedEntity(
+                name="Ahmed Hassan",
+                category="Person",
+                entity_id="person:ahmed-hassan",
+            )
+        ]
+    )
+    assert builder.add_entities_and_relations("paper.pdf", result)
+    assert any(
+        "MERGE (e:Entity {uid: $uid})" in query
+        for query in driver.fake_session.queries
+    )
+
+
+def test_compact_graph_write_policy() -> None:
+    """Byline metadata and mention edges must not inflate the Neo4j graph."""
+
+    class FakeResult:
+        def consume(self):
+            return self
+
+        def single(self):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def run(self, query, **params):
+            self.queries.append(query)
+            return FakeResult()
+
+    class FakeDriver:
+        def __init__(self):
+            self.fake_session = FakeSession()
+
+        def session(self):
+            return self.fake_session
+
+    builder = GraphBuilder()
+    driver = FakeDriver()
+    builder._driver = driver
+    result = GraphExtractionResult(
+        entities=[
+            ExtractedEntity(
+                name="Paper Author",
+                category="Person",
+                description="Author of the paper",
+                entity_id="person:paper-author",
+            ),
+            ExtractedEntity(
+                name="Author University",
+                category="Organization",
+                description="Affiliation of Paper Author",
+                entity_id="organization:author-university",
+            ),
+            ExtractedEntity(
+                name="Useful Method",
+                category="Method",
+                entity_id="method:useful-method",
+            ),
+        ],
+        mentions=[SimpleNamespace(
+            entity_id="method:useful-method",
+            chunk_id="paper:0",
+            text="Useful Method",
+            evidence="We use Useful Method.",
+        )],
+    )
+    assert builder.add_entities_and_relations("paper.pdf", result)
+    rendered = "\n".join(driver.fake_session.queries)
+    assert "MENTIONS" not in rendered
+    assert "Paper Author" not in rendered
+    assert rendered.count("CONTAINS_ENTITY") == 0
+    assert "USES_METHOD" in rendered
+
+
 if __name__ == "__main__":
     test_topics()
     test_mentions_and_resolution()
+    test_quality_filter_and_alias_merge()
     test_same_name_is_scoped_conservatively()
     test_cloud_client_contract()
     test_role_specific_model_routing()
+    test_paper_level_extraction_cache()
+    test_dynamic_entity_cypher_is_renderable()
+    test_compact_graph_write_policy()
     print("Graph redesign tests passed")
 

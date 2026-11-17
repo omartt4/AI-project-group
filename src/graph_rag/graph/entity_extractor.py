@@ -8,14 +8,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from graph_rag.config import settings
 from graph_rag.llm.model_client import extraction_model_client
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_ENTITY_CATEGORIES = {
-    "Person", "Organization", "Topic", "Method", "Dataset", "Finding",
-    "Metric", "Task", "Tool",
-}
+ALLOWED_ENTITY_CATEGORIES = frozenset({
+    "Person", "Organization", "Method", "Dataset",
+})
 
 ALLOWED_RELATION_TYPES = {
     "AUTHORED", "AFFILIATED_WITH", "HOLDS_ROLE", "PROPOSES",
@@ -92,9 +92,22 @@ Rules:
 5. Every relation must quote short supporting evidence from this chunk.
 6. Do not infer facts that the text does not state.
 7. New entities must leave entity_id empty; the application assigns their stable ID.
+8. Do not extract Topic entities here. Paper topics are classified once from title,
+   abstract, keywords, and metadata by the topic-taxonomy stage.
+9. Create entities only for reusable, named objects. Do not create entities for
+   table/figure references, citation groups such as "Zhu et al.", parameter values,
+   generic words such as "accuracy", or extraction commentary.
+10. Findings, metrics, tasks, and tools are not nodes. Preserve them in a
+    relation description, evidence, or entity attributes when relevant.
+11. Extract only methods and datasets actually proposed, used, or evaluated by
+    this paper; ignore items merely listed in related work or references.
+12. Do not create Person nodes solely from the paper byline or bibliography.
+13. Put acronyms and alternate spellings in aliases instead of creating another entity.
+14. For a Person identified by a role phrase, set attributes.role and
+    attributes.organization whenever the text states them.
 
 Allowed entity categories:
-Person, Organization, Topic, Method, Dataset, Finding, Metric, Task, Tool
+Person, Organization, Method, Dataset
 
 Allowed relation types:
 AUTHORED, AFFILIATED_WITH, HOLDS_ROLE, PROPOSES, EVALUATES_ON,
@@ -124,7 +137,32 @@ def _category(value: Any) -> str:
     for allowed in ALLOWED_ENTITY_CATEGORIES:
         if allowed.casefold() == raw:
             return allowed
-    return "Topic"
+    return ""
+
+
+_REJECTED_NAME_PATTERNS = (
+    re.compile(r"^\d+\s+", re.IGNORECASE),
+    re.compile(r"^(?:table|figure|equation|section)\s+\d+\b", re.IGNORECASE),
+    re.compile(r"\b(?:name garbled|extraction error|cited work)\b", re.IGNORECASE),
+    re.compile(r"\bet\s+al\.?$", re.IGNORECASE),
+)
+
+_GENERIC_ENTITY_NAMES = {
+    "accuracy", "precision", "recall", "inference time",
+    "trainable parameters", "objective evaluation scores",
+}
+
+
+def _valid_entity_name(name: str, category: str) -> bool:
+    """Reject obvious extraction artifacts without imposing an entity-count cap."""
+    if len(name) < 2 or not category:
+        return False
+    if any(pattern.search(name) for pattern in _REJECTED_NAME_PATTERNS):
+        return False
+    if name.casefold().strip() in _GENERIC_ENTITY_NAMES:
+        return False
+    word_count = len(re.findall(r"\b\w+\b", name, flags=re.UNICODE))
+    return word_count <= 12
 
 
 class EntityExtractor:
@@ -144,7 +182,7 @@ class EntityExtractor:
             document_title=document_title or "Unknown paper",
             chunk_id=chunk_id or "unknown",
             known_entities=json.dumps(known_entities or [], ensure_ascii=False),
-            text=text[:6000],
+            text=text[:settings.GRAPH_EXTRACTION_MAX_CHARS],
         )
         try:
             raw_response = self.client.generate(
@@ -154,11 +192,8 @@ class EntityExtractor:
             )
             return self._parse_json_response(raw_response, chunk_id=chunk_id)
         except Exception as exc:
-            logger.warning(
-                "Entity extraction failed for chunk %s: %s. Using conservative fallback.",
-                chunk_id, exc,
-            )
-            return self._rule_based_fallback(text, chunk_id=chunk_id)
+            logger.error("Entity extraction failed for %s: %s", chunk_id, exc)
+            raise RuntimeError(f"Graph extraction failed for {chunk_id}: {exc}") from exc
 
     def _parse_json_response(self, raw: str, chunk_id: str = "") -> GraphExtractionResult:
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -174,7 +209,9 @@ class EntityExtractor:
             if not isinstance(row, dict):
                 continue
             name = str(row.get("name") or "").strip()
-            if len(name) < 2:
+            category = _category(row.get("category"))
+            if not _valid_entity_name(name, category):
+                logger.info("Rejected low-quality entity candidate: %r", name)
                 continue
             aliases = [str(alias).strip() for alias in row.get("aliases", []) if str(alias).strip()]
             raw_attributes = row.get("attributes") or {}
@@ -185,7 +222,7 @@ class EntityExtractor:
             entities.append(ExtractedEntity(
                 entity_id=str(row.get("entity_id") or "").strip(),
                 name=name,
-                category=_category(row.get("category")),
+                category=category,
                 description=str(row.get("description") or "").strip(),
                 aliases=aliases,
                 attributes=attributes,
@@ -238,24 +275,6 @@ class EntityExtractor:
         return GraphExtractionResult(entities=entities, mentions=mentions, relations=relations)
 
     def _rule_based_fallback(self, text: str, chunk_id: str = "") -> GraphExtractionResult:
-        """Extract only explicit acronyms; never invent people or relationships."""
-        entities: List[ExtractedEntity] = []
-        mentions: List[ExtractedMention] = []
-        ignored = {"THE", "FOR", "AND", "WITH", "THAT", "THIS"}
-        for acronym in sorted(set(re.findall(r"\b[A-Z]{2,8}\b", text)) - ignored):
-            entities.append(ExtractedEntity(
-                name=acronym,
-                category="Method",
-                description="Explicit acronym found by fallback extraction",
-            ))
-            mentions.append(ExtractedMention(
-                text=acronym,
-                entity_name=acronym,
-                entity_category="Method",
-                mention_type="name",
-                evidence=acronym,
-                confidence=0.35,
-                chunk_id=chunk_id,
-            ))
-        return GraphExtractionResult(entities=entities, mentions=mentions)
+        """Fail closed: an unavailable model must not pollute the graph."""
+        return GraphExtractionResult()
 entity_extractor = EntityExtractor()

@@ -6,7 +6,8 @@ current corpus. It does not reuse the old Neo4j graph or old embedding vectors.
 ## Graph hierarchy
 
 ```text
-(Topic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
+(TopLevelTopic)-[:HAS_SUBTOPIC]->(Subtopic)
+(TopLevelTopic|Subtopic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
 (Chunk)-[:CONTAINS_MENTION]->(Mention)-[:REFERS_TO]->(Entity)
 ```
 
@@ -56,10 +57,11 @@ The initial active topics are:
 - Computer Vision
 - Natural Language Processing
 
-They are seeds, not a closed list. Known aliases such as `ML`, `CV`, and `NLP`
-map deterministically to their canonical topic. A new topic is created with
-`candidate` status and can later be reviewed and promoted. A paper may connect
-to multiple topics.
+Known aliases such as `ML`, `CV`, and `NLP` map deterministically to their
+canonical `TopLevelTopic`. Specialist areas become `Subtopic` nodes connected
+to their parent by `HAS_SUBTOPIC`. A genuinely new domain is created as a
+candidate top-level topic and can later be reviewed and promoted. Papers and
+subtopics may connect to multiple top-level topics.
 
 ## Cloud models and vector versioning
 

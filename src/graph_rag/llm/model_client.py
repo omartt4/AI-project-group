@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from graph_rag.config import settings
+from graph_rag.llm.cost_tracker import cost_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class CloudModelClient:
         api_key: Optional[str] = None,
         llm_model: Optional[str] = None,
         embed_model: Optional[str] = None,
+        role: str = "chat",
     ) -> None:
         self.base_url = (base_url or settings.MODEL_API_BASE_URL).rstrip("/")
         self.api_key = api_key if api_key is not None else settings.MODEL_API_KEY
@@ -38,6 +40,7 @@ class CloudModelClient:
         )
         self.timeout_seconds = settings.MODEL_TIMEOUT_SECONDS
         self.max_retries = settings.MODEL_MAX_RETRIES
+        self.role = role
 
     def _headers(self) -> Dict[str, str]:
         if not self.api_key:
@@ -99,7 +102,13 @@ class CloudModelClient:
                     exc,
                 )
 
-        raise RuntimeError(f"Cloud model request failed after retries: {last_error}")
+        detail = ""
+        if isinstance(last_error, httpx.HTTPStatusError):
+            try:
+                detail = f" Response: {last_error.response.text[:500]}"
+            except Exception:
+                pass
+        raise RuntimeError(f"Cloud model request failed: {last_error}.{detail}")
 
     def is_available(self) -> bool:
         """Return whether the configured API is reachable with valid credentials."""
@@ -138,11 +147,19 @@ class CloudModelClient:
             "model": self.llm_model,
             "messages": messages,
             "temperature": temperature,
+            "usage": {"include": True},
         }
         if response_format:
             payload["response_format"] = response_format
 
         data = self._post("/chat/completions", payload)
+        cost_tracker.record(
+            role=self.role,
+            operation="generation",
+            model=self.llm_model,
+            endpoint="/chat/completions",
+            usage=data.get("usage") or {},
+        )
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -165,11 +182,22 @@ class CloudModelClient:
                 "OPENROUTER_EMBED_MODEL is missing. Add an embedding model ID to .env."
             )
 
-        payload: Dict[str, Any] = {"model": self.embed_model, "input": texts}
+        payload: Dict[str, Any] = {
+            "model": self.embed_model,
+            "input": texts,
+            "usage": {"include": True},
+        }
         if settings.EMBEDDING_DIMENSIONS:
             payload["dimensions"] = settings.EMBEDDING_DIMENSIONS
 
         response = self._post("/embeddings", payload)
+        cost_tracker.record(
+            role=self.role,
+            operation="embedding",
+            model=self.embed_model,
+            endpoint="/embeddings",
+            usage=response.get("usage") or {},
+        )
         rows = response.get("data")
         if not isinstance(rows, list) or len(rows) != len(texts):
             raise RuntimeError("Embedding response count did not match the input count")
@@ -183,18 +211,22 @@ class CloudModelClient:
 extraction_model_client = CloudModelClient(
     llm_model=settings.EXTRACTION_MODEL,
     embed_model="",
+    role="extraction",
 )
 chat_model_client = CloudModelClient(
     llm_model=settings.CHAT_MODEL,
     embed_model="",
+    role="chat",
 )
 evaluation_model_client = CloudModelClient(
     llm_model=settings.EVALUATION_MODEL,
     embed_model="",
+    role="evaluation",
 )
 embedding_model_client = CloudModelClient(
     llm_model="",
     embed_model=settings.EMBEDDING_MODEL,
+    role="embedding",
 )
 
 # Backward-compatible alias for external imports. New application code should
