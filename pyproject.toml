@@ -27,6 +27,7 @@ dependencies = [
     "yake>=0.5.1",
     "numpy>=1.24.0",
     "rank-bm25>=0.2.2",
+    "sentence-transformers>=6.3.0",
 ]
 
 [project.scripts]

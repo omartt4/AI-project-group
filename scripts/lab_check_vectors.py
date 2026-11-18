@@ -21,10 +21,10 @@ from lab_common import (
 )
 
 
-def get_collection_name(model_tag: str, chunk_size: int, chunk_overlap: int, mode: str) -> str:
-    """Generate Chroma collection name."""
+def get_collection_name(model_tag: str, embed_dim: int, chunk_size: int, chunk_overlap: int, mode: str) -> str:
+    """Generate Chroma collection name with model and dimension."""
     safe_tag = model_tag.replace("/", "_").replace(":", "_")
-    return f"retrieval_lab_{safe_tag}_{chunk_size}_{chunk_overlap}_{mode}"
+    return f"retrieval_lab_{safe_tag}_{embed_dim}_{chunk_size}_{chunk_overlap}_{mode}"
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

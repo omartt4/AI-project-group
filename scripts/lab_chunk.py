@@ -434,6 +434,8 @@ def main():
     parser.add_argument("--pdf-dir", default=None, help="PDF directory (default: from config)")
     parser.add_argument("--quick", action="store_true", help="Use only 2 papers per field (6 total)")
     parser.add_argument("--cut-references", action="store_true", help="Remove references section")
+    parser.add_argument("--chunk-size", type=int, default=None, help="Chunk size in tokens (default: from config)")
+    parser.add_argument("--chunk-overlap", type=int, default=None, help="Chunk overlap in tokens (default: from config)")
     args = parser.parse_args()
     
     # Verify models first
@@ -444,6 +446,16 @@ def main():
     
     if args.pdf_dir:
         config.pdf_dir = args.pdf_dir
+    
+    # Override chunk size/overlap if specified
+    if args.chunk_size:
+        config.chunk_size = args.chunk_size
+    if args.chunk_overlap:
+        config.chunk_overlap = args.chunk_overlap
+    elif args.chunk_size == 256:
+        config.chunk_overlap = config.chunk_overlap_256
+    elif args.chunk_size == 1024:
+        config.chunk_overlap = config.chunk_overlap_1024
     
     # Privacy warning
     print_warning("Free endpoints log prompts. Only research PDFs will be sent, never personal documents.")

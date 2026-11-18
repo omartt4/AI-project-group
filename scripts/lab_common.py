@@ -31,24 +31,29 @@ class LabConfig:
     chunk_unit: str = "tokens"  # "tokens" or "chars"
     chunk_size: int = 512
     chunk_overlap: int = 51  # 10% of 512
+    chunk_overlap_256: int = 26  # 10% of 256
+    chunk_overlap_1024: int = 102  # 10% of 1024
     separators: list[str] = field(default_factory=lambda: ["\n\n", "\n", ". ", " ", ""])
     
     # Embedding models (OpenRouter)
+    embed_backend: str = field(default_factory=lambda: os.getenv("LAB_EMBED_BACKEND", "local"))  # "local" or "openrouter"
     embed_model: str = field(default_factory=lambda: os.getenv("LAB_EMBED_MODEL", "nvidia/nemotron-3.5-embed-1b:free"))
     embed_model_alt: str = field(default_factory=lambda: os.getenv("LAB_EMBED_MODEL_ALT", "liquid/lfm-2.5-embedding-350m:free"))
+    embed_model_local: str = field(default_factory=lambda: os.getenv("LAB_EMBED_MODEL_LOCAL", "BAAI/bge-small-en-v1.5"))
     chat_model: str = field(default_factory=lambda: os.getenv("LAB_CHAT_MODEL", "nvidia/nemotron-3.5-lightning:free"))
     qgen_model: str = field(default_factory=lambda: os.getenv("LAB_QGEN_MODEL", "google/gemma-4-31b-it:free"))
+    qgen_fallbacks: str = field(default_factory=lambda: os.getenv("LAB_QGEN_FALLBACKS", "nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free"))
     rerank_model: str = field(default_factory=lambda: os.getenv("LAB_RERANK_MODEL", ""))
     
     # API settings
     openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
     openrouter_base_url: str = field(default_factory=lambda: os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
     requests_per_min: int = field(default_factory=lambda: int(os.getenv("LAB_REQUESTS_PER_MIN", "1")))  # 1 per 60s
-    batch_size: int = 1  # Single chunk per request to minimize rate limit issues
+    batch_size: int = 32  # Larger batch for local embeddings
     
     # Embedding parameters
     embed_dim: Optional[int] = field(default_factory=lambda: int(os.getenv("LAB_EMBED_DIM", "")) if os.getenv("LAB_EMBED_DIM") else None)
-    query_prefix: str = field(default_factory=lambda: os.getenv("LAB_QUERY_PREFIX", ""))
+    query_prefix: str = field(default_factory=lambda: os.getenv("LAB_QUERY_PREFIX", "Represent this sentence for searching relevant passages: "))  # BGE prefix for queries only
     
     # Retrieval
     top_k: int = 5

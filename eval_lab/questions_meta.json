@@ -1,0 +1,32 @@
+{
+  "model": "nvidia/nemotron-3.5-lightning:free",
+  "seed": 42,
+  "total_questions": 40,
+  "papers": [
+    "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing",
+    "002_NLP_Regularized_Attentive_Capsule_Network_for_Overlapped_Relation_Extraction",
+    "003_NLP_Should_I_visit_this_place_Inclusion_and_Exclusion_Phrase_Mining_from_Reviews",
+    "035_Computer_Vision_Leaf_Segmentation_and_Counting_with_Deep_Learning_on_Model_Certainty_Test-Time_Augmentation_Trade-Of",
+    "041_Computer_Vision_Appearance-Invariant_6-DoF_Visual_Localization_using_Generative_Adversarial_Networks",
+    "045_Computer_Vision_Multi-Task_Multi-Sensor_Fusion_for_3D_Object_Detection",
+    "072_Machine_Learning_Ensemble_model_for_pre-discharge_icd10_coding_prediction"
+  ],
+  "counts_by_paper": {
+    "001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing": 6,
+    "002_NLP_Regularized_Attentive_Capsule_Network_for_Overlapped_Relation_Extraction": 5,
+    "003_NLP_Should_I_visit_this_place_Inclusion_and_Exclusion_Phrase_Mining_from_Reviews": 5,
+    "035_Computer_Vision_Leaf_Segmentation_and_Counting_with_Deep_Learning_on_Model_Certainty_Test-Time_Augmentation_Trade-Of": 6,
+    "041_Computer_Vision_Appearance-Invariant_6-DoF_Visual_Localization_using_Generative_Adversarial_Networks": 6,
+    "045_Computer_Vision_Multi-Task_Multi-Sensor_Fusion_for_3D_Object_Detection": 6,
+    "072_Machine_Learning_Ensemble_model_for_pre-discharge_icd10_coding_prediction": 6
+  },
+  "counts_by_style": {
+    "factual": 14,
+    "conceptual": 13,
+    "paraphrased": 13
+  },
+  "failed_papers": [
+    "074_Machine_Learning_Unifying_Homophily_and_Heterophily_Network_Transformation_via_Motifs",
+    "090_Machine_Learning_Adaptive_Precision_Training_for_Resource_Constrained_Devices"
+  ]
+}

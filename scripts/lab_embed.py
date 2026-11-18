@@ -291,11 +291,118 @@ class OpenRouterEmbedder:
         return [[0.0] * dim for _ in texts], tokens_used
 
 
-def get_collection_name(model_tag: str, chunk_size: int, chunk_overlap: int, mode: str) -> str:
-    """Generate Chroma collection name."""
+class LocalEmbedder:
+    """Local embedding client using sentence-transformers."""
+    
+    def __init__(self, model_name: str, query_prefix: str, cache_dir: str):
+        self.model_name = model_name
+        self.query_prefix = query_prefix
+        self.cache = EmbeddingCache(cache_dir)
+        self.model = None
+        self.embed_dim = None
+        self.max_seq_length = None
+        self._load_model()
+    
+    def _load_model(self):
+        """Load the sentence-transformers model."""
+        from sentence_transformers import SentenceTransformer
+        print(f"Loading local model: {self.model_name}")
+        self.model = SentenceTransformer(self.model_name)
+        self.embed_dim = self.model.get_sentence_embedding_dimension()
+        # Get max sequence length from model config
+        try:
+            self.max_seq_length = self.model.max_seq_length
+        except AttributeError:
+            # Fallback to common defaults if not available
+            self.max_seq_length = 512  # BGE-small default
+        print(f"Model loaded: {self.model_name} (dim={self.embed_dim}, max_seq_length={self.max_seq_length})")
+    
+    def check_chunk_lengths(self, chunks: List[Dict]) -> tuple[int, int, int]:
+        """
+        Check chunk lengths using the model's tokenizer.
+        Returns (max_tokens, mean_tokens, num_exceeding).
+        """
+        if not hasattr(self.model, 'tokenizer'):
+            print_warning("Model has no tokenizer, using word count as fallback")
+            token_counts = [len(c.get("text", "").split()) for c in chunks]
+            return max(token_counts), int(sum(token_counts) / len(token_counts)), 0
+        
+        token_counts = []
+        for chunk in chunks:
+            text = chunk.get("text", "")
+            # Use preprocess method (non-deprecated) to get token count
+            try:
+                # preprocess returns a dict with 'input_ids' or similar
+                processed = self.model.preprocess([text])
+                if isinstance(processed, dict) and 'input_ids' in processed:
+                    count = len(processed['input_ids'][0]) if isinstance(processed['input_ids'], list) else len(processed['input_ids'])
+                elif isinstance(processed, list) and len(processed) > 0:
+                    count = len(processed[0]) if isinstance(processed[0], list) else len(processed)
+                else:
+                    # Fallback to word count
+                    count = len(text.split())
+            except Exception as e:
+                print_warning(f"Tokenizer error: {e}, using word count fallback")
+                count = len(text.split())
+            token_counts.append(count)
+        
+        max_tokens = max(token_counts)
+        mean_tokens = int(sum(token_counts) / len(token_counts))
+        num_exceeding = sum(1 for c in token_counts if c > self.max_seq_length)
+        
+        return max_tokens, mean_tokens, num_exceeding
+    
+    def embed_batch(self, texts: List[str], is_query: bool = False) -> tuple[List[List[float]], int]:
+        """
+        Embed a batch of texts with caching.
+        Returns (embeddings, tokens_used).
+        """
+        result = [None] * len(texts)
+        uncached_texts = []
+        uncached_indices = []
+        
+        # Check cache first
+        for i, text in enumerate(texts):
+            prefix = self.query_prefix if is_query else ""
+            cached = self.cache.get(self.model_name, self.embed_dim, prefix, text)
+            if cached is not None:
+                result[i] = cached
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+        
+        if not uncached_texts:
+            return result, 0
+        
+        # Prepare texts with prefix for queries
+        texts_to_embed = []
+        for text in uncached_texts:
+            if is_query:
+                texts_to_embed.append(self.query_prefix + text)
+            else:
+                texts_to_embed.append(text)
+        
+        # Embed uncached texts
+        new_embeddings = self.model.encode(texts_to_embed, convert_to_numpy=True, normalize_embeddings=True)
+        new_embeddings = new_embeddings.tolist()
+        
+        # Estimate tokens (rough approximation)
+        tokens_used = sum(len(t.split()) for t in uncached_texts)
+        
+        # Cache new embeddings and place in result
+        for idx, text, emb in zip(uncached_indices, uncached_texts, new_embeddings):
+            prefix = self.query_prefix if is_query else ""
+            self.cache.set(self.model_name, self.embed_dim, prefix, text, emb)
+            result[idx] = emb
+        
+        return result, tokens_used
+
+
+def get_collection_name(model_tag: str, embed_dim: int, chunk_size: int, chunk_overlap: int, mode: str) -> str:
+    """Generate Chroma collection name with model and dimension."""
     # Sanitize model tag for collection name
     safe_tag = model_tag.replace("/", "_").replace(":", "_")
-    return f"retrieval_lab_{safe_tag}_{chunk_size}_{chunk_overlap}_{mode}"
+    return f"retrieval_lab_{safe_tag}_{embed_dim}_{chunk_size}_{chunk_overlap}_{mode}"
 
 
 def estimate_requests(chunks: List[Dict], batch_size: int, model_context: int) -> Dict:
@@ -322,10 +429,11 @@ def estimate_requests(chunks: List[Dict], batch_size: int, model_context: int) -
     }
 
 
-def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm: bool = True):
+def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm: bool = True, allow_truncation: bool = False):
     """
     Embed chunks and store in ChromaDB.
     mode: "vector" (raw text) or "enriched" (keywords + text)
+    backend: "local" or "openrouter" (from config)
     """
     print_section("Phase 2: Embedding Chunks")
     
@@ -334,6 +442,23 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
         print_error(f"Chunks file not found: {chunks_file}")
         sys.exit(1)
     
+    # Extract chunk_size and chunk_overlap from filename (e.g., chunks_512_51.jsonl)
+    stem = chunks_path.stem  # e.g., "chunks_512_51"
+    parts = stem.split("_")
+    if len(parts) >= 3 and parts[0] == "chunks":
+        try:
+            chunk_size = int(parts[1])
+            chunk_overlap = int(parts[2])
+            print(f"Detected chunk size/overlap from filename: {chunk_size}/{chunk_overlap}")
+        except ValueError:
+            chunk_size = config.chunk_size
+            chunk_overlap = config.chunk_overlap
+            print_warning("Could not parse chunk size/overlap from filename, using config defaults")
+    else:
+        chunk_size = config.chunk_size
+        chunk_overlap = config.chunk_overlap
+        print_warning("Filename format not recognized, using config defaults")
+    
     # Load chunks
     chunks = []
     with open(chunks_path, "r", encoding="utf-8") as f:
@@ -341,26 +466,60 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
             chunks.append(json.loads(line))
     
     print(f"Loaded {len(chunks)} chunks from {chunks_file}")
+    print(f"Backend: {config.embed_backend}")
     print(f"Model: {model_id}")
     print(f"Mode: {mode}")
     
-    # Verify models
-    verify_all_models()
+    # Determine actual model to use
+    if config.embed_backend == "local":
+        actual_model = config.embed_model_local
+    else:
+        actual_model = model_id
     
-    # Create embedder
-    embedder = OpenRouterEmbedder(
-        model_id=model_id,
-        api_key=config.openrouter_api_key,
-        base_url=config.openrouter_base_url,
-        embed_dim=config.embed_dim,
-        query_prefix=config.query_prefix,
-        requests_per_min=config.requests_per_min,
-        cache_dir=config.data_dir
-    )
+    # Create embedder based on backend
+    if config.embed_backend == "local":
+        embedder = LocalEmbedder(
+            model_name=actual_model,
+            query_prefix=config.query_prefix,
+            cache_dir=config.data_dir
+        )
+        embed_dim = embedder.embed_dim
+        model_context = embedder.max_seq_length  # Use actual model limit
+        
+        # Check chunk lengths against model's max sequence length
+        print_section("Checking Chunk Lengths")
+        max_tokens, mean_tokens, num_exceeding = embedder.check_chunk_lengths(chunks)
+        print(f"  Max chunk tokens (model tokenizer): {max_tokens}")
+        print(f"  Mean chunk tokens (model tokenizer): {mean_tokens}")
+        print(f"  Model max sequence length: {embedder.max_seq_length}")
+        print(f"  Chunks exceeding limit: {num_exceeding}/{len(chunks)}")
+        
+        if num_exceeding > 0 and not allow_truncation:
+            print_error(f"{num_exceeding} chunks exceed model max sequence length ({embedder.max_seq_length})")
+            print_error("This would cause silent truncation and invalid embeddings.")
+            print_error("Re-run with --allow-truncation to proceed anyway (not recommended),")
+            print_error("or re-chunk with a smaller chunk size (recommended: <= 256 for BGE-small).")
+            sys.exit(1)
+        elif num_exceeding > 0:
+            print_warning(f"{num_exceeding} chunks exceed model max sequence length - proceeding with potential truncation")
+    else:
+        # Verify models for OpenRouter
+        verify_all_models()
+        embedder = OpenRouterEmbedder(
+            model_id=model_id,
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
+            embed_dim=config.embed_dim,
+            query_prefix=config.query_prefix,
+            requests_per_min=config.requests_per_min,
+            cache_dir=config.data_dir
+        )
+        embed_dim = config.embed_dim or embedder.context_length
+        model_context = embedder.context_length
     
     # Estimate usage
-    model_tag = model_id.replace("/", "_").replace(":", "_")
-    estimate = estimate_requests(chunks, config.batch_size, embedder.context_length)
+    model_tag = actual_model.replace("/", "_").replace(":", "_")
+    estimate = estimate_requests(chunks, config.batch_size, model_context)
     
     if estimate is None:
         sys.exit(1)
@@ -383,8 +542,12 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
     print(f"  Total tokens: {estimate['total_tokens']:,}")
     print(f"  Max chunk tokens: {estimate['max_chunk_tokens']}")
     print(f"  Model context: {estimate['model_context']:,}")
-    print(f"  Requests (batch size {config.batch_size}): {estimate['num_requests']}")
-    print(f"  Estimated time at {config.requests_per_min} req/min: {estimate['num_requests'] / config.requests_per_min:.1f} min")
+    print(f"  Embedding dimension: {embed_dim}")
+    if config.embed_backend == "local":
+        print(f"  Local embedding (no rate limit)")
+    else:
+        print(f"  Requests (batch size {config.batch_size}): {estimate['num_requests']}")
+        print(f"  Estimated time at {config.requests_per_min} req/min: {estimate['num_requests'] / config.requests_per_min:.1f} min")
     
     if confirm:
         response = input("\nProceed? (y/n): ")
@@ -411,7 +574,7 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
     # Check enriched mode doesn't exceed context
     if mode == "enriched":
         max_enriched = max(len(t.split()) for t in texts)  # Rough estimate
-        if max_enriched > embedder.context_length:
+        if max_enriched > model_context:
             print_warning(f"Enriched mode may exceed context: {max_enriched} tokens")
             response = input("Continue anyway? (y/n): ")
             if response.lower() != "y":
@@ -432,7 +595,7 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
         # Check cache hits before calling
         batch_cache_hits = sum(
             1 for t in batch
-            if embedder.cache.get(model_id, config.embed_dim, config.query_prefix if mode == "vector" else "", t) is not None
+            if embedder.cache.get(actual_model, embed_dim, config.query_prefix if mode == "vector" else "", t) is not None
         )
         cache_hits += batch_cache_hits
         
@@ -441,13 +604,13 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
         total_tokens += batch_tokens
     
     wall_time = time.time() - start_time
-    avg_latency = embedder.total_latency / embedder.request_count if embedder.request_count > 0 else 0
+    avg_latency = getattr(embedder, 'total_latency', 0) / getattr(embedder, 'request_count', 1) if hasattr(embedder, 'request_count') and embedder.request_count > 0 else 0
     
     # Store in ChromaDB
     print_section("Storing in ChromaDB")
     
     chroma_client = chromadb.PersistentClient(path=config.chroma_dir)
-    collection_name = get_collection_name(model_tag, config.chunk_size, config.chunk_overlap, mode)
+    collection_name = get_collection_name(model_tag, embed_dim, chunk_size, chunk_overlap, mode)
     
     # Delete existing collection if present
     try:
@@ -489,46 +652,94 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
     
     print(f"Stored {len(all_embeddings)} embeddings in collection: {collection_name}")
     
-    # Save report
-    report = {
-        "model_id": model_id,
-        "mode": mode,
-        "chunk_size": config.chunk_size,
-        "chunk_overlap": config.chunk_overlap,
-        "collection_name": collection_name,
-        "total_chunks": len(chunks),
-        "total_tokens": total_tokens,
-        "num_requests": embedder.request_count,
-        "failed_requests": embedder.failed_requests,
-        "retried_requests": embedder.retried_requests,
-        "cache_hits": cache_hits,
-        "wall_time_seconds": wall_time,
-        "tokens_per_second": total_tokens / wall_time if wall_time > 0 else 0,
-        "avg_request_latency_seconds": avg_latency,
-        "embed_dim": config.embed_dim or len(all_embeddings[0]) if all_embeddings else 0,
-        "query_prefix": config.query_prefix,
-        "tokens_estimated": not embedder.usage_returned,  # True if estimated (no usage field)
-        "batch_size": config.batch_size,
-        "model_context": embedder.context_length,
-        "http_status_codes": embedder.http_status_codes,
-        "manifest_papers": len(manifest) if manifest else 0
-    }
-    
+    # Save report (only if not cache-only run)
     report_path = Path(config.data_dir) / f"embedding_report_{model_tag}_{mode}.json"
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
     
-    print(f"\nReport saved to {report_path}")
-    print(f"  Wall time: {wall_time:.1f}s")
-    print(f"  Tokens/sec: {report['tokens_per_second']:.1f}")
-    print(f"  Avg request latency: {avg_latency:.2f}s")
-    print(f"  Tokens estimated: {report['tokens_estimated']}")
-    print(f"  HTTP status codes: {report['http_status_codes']}")
-    print(f"  Manifest papers: {report['manifest_papers']}")
-    print(f"  Cache hits: {cache_hits}")
-    print(f"  Failed requests: {embedder.failed_requests}")
-    print(f"  Retried requests: {embedder.retried_requests}")
-    print(f"  Total tokens: {total_tokens:,}")
+    # Check if this was a cache-only run (all embeddings from cache)
+    if cache_hits == len(chunks):
+        print_warning(f"Cache-only run (all {len(chunks)} chunks from cache)")
+        if report_path.exists():
+            print_warning(f"Skipping report overwrite to preserve previous results")
+            print_warning(f"Existing report: {report_path}")
+        else:
+            # Still save report for first run
+            report = {
+                "backend": config.embed_backend,
+                "model_id": actual_model,
+                "mode": mode,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "collection_name": collection_name,
+                "total_chunks": len(chunks),
+                "total_tokens": total_tokens,
+                "num_requests": getattr(embedder, 'request_count', 0),
+                "failed_requests": getattr(embedder, 'failed_requests', 0),
+                "retried_requests": getattr(embedder, 'retried_requests', 0),
+                "cache_hits": cache_hits,
+                "wall_time_seconds": wall_time,
+                "tokens_per_second": total_tokens / wall_time if wall_time > 0 else 0,
+                "avg_request_latency_seconds": avg_latency,
+                "embed_dim": embed_dim,
+                "query_prefix": config.query_prefix,
+                "batch_size": config.batch_size,
+                "model_context": model_context,
+                "http_status_codes": getattr(embedder, 'http_status_codes', []),
+                "manifest_papers": len(manifest) if manifest else 0
+            }
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"\nReport saved to {report_path}")
+            print(f"  Wall time: {wall_time:.1f}s")
+            print(f"  Tokens/sec: {report['tokens_per_second']:.1f}")
+            if config.embed_backend == "openrouter":
+                print(f"  Avg request latency: {avg_latency:.2f}s")
+                print(f"  Tokens estimated: {report.get('tokens_estimated', False)}")
+                print(f"  HTTP status codes: {report.get('http_status_codes', [])}")
+                print(f"  Failed requests: {report.get('failed_requests', 0)}")
+                print(f"  Retried requests: {report.get('retried_requests', 0)}")
+            print(f"  Manifest papers: {report['manifest_papers']}")
+            print(f"  Cache hits: {cache_hits}")
+            print(f"  Total tokens: {total_tokens:,}")
+    else:
+        # Normal run with actual embeddings, save report
+        report = {
+            "backend": config.embed_backend,
+            "model_id": actual_model,
+            "mode": mode,
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+            "collection_name": collection_name,
+            "total_chunks": len(chunks),
+            "total_tokens": total_tokens,
+            "num_requests": getattr(embedder, 'request_count', 0),
+            "failed_requests": getattr(embedder, 'failed_requests', 0),
+            "retried_requests": getattr(embedder, 'retried_requests', 0),
+            "cache_hits": cache_hits,
+            "wall_time_seconds": wall_time,
+            "tokens_per_second": total_tokens / wall_time if wall_time > 0 else 0,
+            "avg_request_latency_seconds": avg_latency,
+            "embed_dim": embed_dim,
+            "query_prefix": config.query_prefix,
+            "batch_size": config.batch_size,
+            "model_context": model_context,
+            "http_status_codes": getattr(embedder, 'http_status_codes', []),
+            "manifest_papers": len(manifest) if manifest else 0
+        }
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        
+        print(f"\nReport saved to {report_path}")
+        print(f"  Wall time: {wall_time:.1f}s")
+        print(f"  Tokens/sec: {report['tokens_per_second']:.1f}")
+        if config.embed_backend == "openrouter":
+            print(f"  Avg request latency: {avg_latency:.2f}s")
+            print(f"  Tokens estimated: {report.get('tokens_estimated', False)}")
+            print(f"  HTTP status codes: {report.get('http_status_codes', [])}")
+            print(f"  Failed requests: {report.get('failed_requests', 0)}")
+            print(f"  Retried requests: {report.get('retried_requests', 0)}")
+        print(f"  Manifest papers: {report['manifest_papers']}")
+        print(f"  Cache hits: {cache_hits}")
+        print(f"  Total tokens: {total_tokens:,}")
 
 
 def main():
@@ -537,15 +748,21 @@ def main():
     parser.add_argument("--chunks", required=True, help="Path to chunks JSONL file")
     parser.add_argument("--mode", choices=["vector", "enriched"], default="vector", help="Embedding mode")
     parser.add_argument("--no-confirm", action="store_true", help="Skip confirmation prompt")
+    parser.add_argument("--allow-truncation", action="store_true", help="Allow chunks exceeding model max sequence length (may truncate)")
+    parser.add_argument("--query-prefix", type=str, default=None, help="Override query prefix (empty string for no prefix)")
     args = parser.parse_args()
     
     config = get_config()
+    
+    # Override query prefix if specified
+    if args.query_prefix is not None:
+        config.query_prefix = args.query_prefix
     
     # Temporarily override embed_model for this run
     original_model = config.embed_model
     config.embed_model = args.model
     
-    embed_and_store(args.chunks, args.model, args.mode, config, confirm=not args.no_confirm)
+    embed_and_store(args.chunks, args.model, args.mode, config, confirm=not args.no_confirm, allow_truncation=args.allow_truncation)
     
     # Restore
     config.embed_model = original_model
