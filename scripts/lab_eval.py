@@ -140,6 +140,23 @@ def compute_metrics(results: List[Dict], top_k: List[int]) -> Dict:
     return metrics
 
 
+def compute_metrics_by_group(results: List[Dict], group_key: str, top_k: List[int]) -> Dict[str, Dict]:
+    """Compute metrics grouped by a key (style or field)."""
+    groups = {}
+    for r in results:
+        key = r[group_key]
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(r)
+    
+    group_metrics = {}
+    for key, group_results in groups.items():
+        group_metrics[key] = compute_metrics(group_results, top_k)
+        group_metrics[key]['n'] = len(group_results)
+    
+    return group_metrics
+
+
 def run_vector_retrieval(
     questions: List[Dict],
     chunks: Dict[str, Dict],
@@ -150,7 +167,8 @@ def run_vector_retrieval(
 ) -> List[Dict]:
     """Run vector retrieval for all questions."""
     # Load Chroma collection
-    client = chromadb.PersistentClient(path="data/chroma", settings=Settings(anonymized_telemetry=False))
+    config = get_config()
+    client = chromadb.PersistentClient(path=config.chroma_dir, settings=Settings(anonymized_telemetry=False))
     collection = client.get_collection(name=collection_name)
     
     results = []
@@ -224,7 +242,8 @@ def run_tests(
     sample_chunks = list(chunks_256.values())[:10]
     hit_count = 0
     collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, 256, 26, "vector")
-    client = chromadb.PersistentClient(path="data/chroma", settings=Settings(anonymized_telemetry=False))
+    config = get_config()
+    client = chromadb.PersistentClient(path=config.chroma_dir, settings=Settings(anonymized_telemetry=False))
     collection = client.get_collection(name=collection_name)
     
     for chunk in sample_chunks:
@@ -234,8 +253,8 @@ def run_tests(
             hit_count += 1
     hit_rate = hit_count / len(sample_chunks)
     test_results['test_a'] = hit_rate >= 0.8
-    print(f"  Hit@1: {hit_rate:.1%} (expected >= 80%)")
-    print(f"  Result: {'PASS' if test_results['test_a'] else 'FAIL'}")
+    print("  Hit@1:", round(hit_rate, 1), "(expected >= 80%)")
+    print("  Result:", "PASS" if test_results['test_a'] else "FAIL")
     
     # Test b: Shuffled gold control
     print("\nTest b: Shuffled gold control")
@@ -250,8 +269,8 @@ def run_tests(
     hit_count = sum(1 for r in retrieval if r['retrieved']['ids'][0][0] == r['question']['chunk_id'])
     hit_rate = hit_count / len(shuffled_questions)
     test_results['test_b'] = hit_rate < 0.2
-    print(f"  Hit@10: {hit_rate:.1%} (expected < 20%)")
-    print(f"  Result: {'PASS' if test_results['test_b'] else 'FAIL'}")
+    print("  Hit@10:", round(hit_rate, 1), "(expected < 20%)")
+    print("  Result:", "PASS" if test_results['test_b'] else "FAIL")
     
     # Test c: Tiny hand-made corpus
     print("\nTest c: Hand-made corpus test")
@@ -265,7 +284,7 @@ def run_tests(
         {'question': 'What is the capital of Germany?', 'chunk_id': 'chunk_2'},
     ]
     
-    # Create tiny collection
+    # Create tiny collection (use config client)
     try:
         client.delete_collection("chunks_tiny")
     except:
@@ -280,8 +299,8 @@ def run_tests(
     retrieval = run_vector_retrieval(tiny_questions, tiny_chunks, "chunks_tiny", model, "", top_k=3)
     hit_count = sum(1 for r in retrieval if r['retrieved']['ids'][0][0] == r['question']['chunk_id'])
     test_results['test_c'] = hit_count == len(tiny_questions)
-    print(f"  Hit@3: {hit_count}/{len(tiny_questions)} (expected {len(tiny_questions)})")
-    print(f"  Result: {'PASS' if test_results['test_c'] else 'FAIL'}")
+    print("  Hit@3:", hit_count, "/", len(tiny_questions), "(expected", len(tiny_questions), ")")
+    print("  Result: " + ("PASS" if test_results['test_c'] else "FAIL"))
     
     # Test d: Question text doesn't contain paper id/title
     print("\nTest d: Question text validation")
@@ -291,15 +310,17 @@ def run_tests(
         if paper_id in q['question'].lower():
             invalid_count += 1
     test_results['test_d'] = invalid_count == 0
-    print(f"  Questions containing paper ID: {invalid_count} (expected 0)")
-    print(f"  Result: {'PASS' if test_results['test_d'] else 'FAIL'}")
+    print("  Questions containing paper ID:", invalid_count, "(expected 0)")
+    print("  Result: " + ("PASS" if test_results['test_d'] else "FAIL"))
     
     # Test d2: 256 gold span maps to exactly one chunk in 384
     if chunks_384:
         print("\nTest d2: 256->384 span mapping")
-        mapping_count = 0
+        unique_count = 0
         multi_count = 0
-        for q in questions[:10]:  # Sample 10
+        zero_count = 0
+        
+        for q in questions:
             gold_chunk = chunks_256[q['chunk_id']]
             gold_center = (gold_chunk['char_start'] + gold_chunk['char_end']) // 2
             matches = 0
@@ -307,15 +328,17 @@ def run_tests(
                 if c384['char_start'] <= gold_center <= c384['char_end']:
                     matches += 1
             if matches == 1:
-                mapping_count += 1
+                unique_count += 1
             elif matches > 1:
                 multi_count += 1
-        test_results['test_d2'] = multi_count == 0
-        print(f"  Unique mappings: {mapping_count}/10, multi-mappings: {multi_count} (expected 0)")
-        print(f"  Result: {'PASS' if test_results['test_d2'] else 'FAIL'}")
-    else:
-        test_results['test_d2'] = True  # Skip if no 384 chunks
-        print("  Skipped (no 384 chunks)")
+            else:
+                zero_count += 1
+        
+        test_results['test_d2'] = zero_count == 0
+        print("  Unique mappings:", unique_count, "/" + str(len(questions)))
+        print("  Multi-mappings:", multi_count, "/" + str(len(questions)) + " (allowed in overlap regions)")
+        print("  Zero-mappings:", zero_count, "/" + str(len(questions)) + " (must be 0)")
+        print("  Result: " + ("PASS" if test_results['test_d2'] else "FAIL"))
     
     return test_results
 
@@ -334,29 +357,29 @@ def main():
     chunks_256 = load_chunks(chunks_256_path)
     chunks_384 = load_chunks(chunks_384_path) if chunks_384_path.exists() else {}
     
-    print(f"Loaded {len(questions)} questions")
-    print(f"Loaded {len(chunks_256)} chunks (256)")
-    print(f"Loaded {len(chunks_384)} chunks (384)")
+    print("Loaded", len(questions), "questions")
+    print("Loaded", len(chunks_256), "chunks (256)")
+    print("Loaded", len(chunks_384), "chunks (384)")
     
     # Check token lengths
     exceeding_256, max_256 = check_token_lengths(list(chunks_256.values()))
-    print(f"Chunk 256: {exceeding_256} chunks exceed {MAX_MODEL_TOKENS} tokens (max: {max_256})")
+    print("Chunk 256:", exceeding_256, "chunks exceed", MAX_MODEL_TOKENS, "tokens (max:", max_256, ")")
     
     if chunks_384:
         exceeding_384, max_384 = check_token_lengths(list(chunks_384.values()))
-        print(f"Chunk 384: {exceeding_384} chunks exceed {MAX_MODEL_TOKENS} tokens (max: {max_384})")
+        print("Chunk 384:", exceeding_384, "chunks exceed", MAX_MODEL_TOKENS, "tokens (max:", max_384, ")")
     
     # Load embedding model
     print_section("Loading Embedding Model")
     model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-    print(f"Model loaded: BAAI/bge-small-en-v1.5")
+    print("Model loaded: BAAI/bge-small-en-v1.5")
     
     # Run tests
     test_results = run_tests(questions, chunks_256, chunks_384, model)
     
     print_section("Test Results")
     for test_name, passed in test_results.items():
-        print(f"  {test_name}: {'PASS' if passed else 'FAIL'}")
+        print("  " + test_name + ":", "PASS" if passed else "FAIL")
     
     # Check if all tests passed
     if not all(test_results.values()):
@@ -367,63 +390,78 @@ def main():
     print_section("Running Evaluation")
     
     all_results = {}
-    collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, 256, 26, "vector")
+    all_eval_results = []
+    all_failures = []
     
-    for prefix in QUERY_PREFIXES:
-        config_key = f"256_{prefix[:30] if prefix else 'none'}"
+    for chunk_size in [256]:  # Only 256 for now, 384 needs separate collection
+        chunks = chunks_256 if chunk_size == 256 else chunks_384
+        if not chunks:
+            continue
+        collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, chunk_size, 26 if chunk_size == 256 else 38, "vector")
         
-        print(f"\nConfig: {config_key}")
-        
-        # Run retrieval
-        retrieval_results = run_vector_retrieval(
-            questions,
-            chunks_256,
-            collection_name,
-            model,
-            prefix
-        )
-        
-        # Evaluate
-        eval_results = []
-        failures = []
-        
-        for result in retrieval_results:
-            question = result['question']
-            retrieved = result['retrieved']
+        for prefix in QUERY_PREFIXES:
+            if prefix:
+                config_key = f"{chunk_size}_instruction"
+            else:
+                config_key = f"{chunk_size}_none"
             
-            gold_text, gold_start, gold_end = get_gold_span(question, chunks_256)
+            print("\nConfig:", config_key)
             
-            # Find gold rank
-            gold_rank = None
-            for i, chunk_id in enumerate(retrieved['ids'][0]):
-                if chunk_id == question['chunk_id']:
-                    gold_rank = i + 1
-                    break
+            # Run retrieval
+            retrieval_results = run_vector_retrieval(
+                questions,
+                chunks,
+                collection_name,
+                model,
+                prefix
+            )
             
-            if gold_rank is None or gold_rank > 10:
-                failures.append({
+            # Evaluate
+            eval_results = []
+            failures = []
+            
+            for result in retrieval_results:
+                question = result['question']
+                retrieved = result['retrieved']
+                
+                gold_text, gold_start, gold_end = get_gold_span(question, chunks)
+                
+                # Find gold rank
+                gold_rank = None
+                for i, chunk_id in enumerate(retrieved['ids'][0]):
+                    if chunk_id == question['chunk_id']:
+                        gold_rank = i + 1
+                        break
+                
+                if gold_rank is None or gold_rank > 10:
+                    failures.append({
+                        'question': question['question'],
+                        'paper_id': question['paper_id'],
+                        'style': question['style'],
+                        'gold_rank': gold_rank if gold_rank else "not in top 50",
+                        'top_3': retrieved['ids'][0][:3]
+                    })
+                
+                eval_results.append({
                     'question': question['question'],
                     'paper_id': question['paper_id'],
+                    'field': question['paper_id'].split('_')[1],
                     'style': question['style'],
-                    'gold_rank': gold_rank if gold_rank else "not in top 50",
-                    'top_3': retrieved['ids'][0][:3]
+                    'rank': gold_rank if gold_rank else 999,
+                    'config': config_key
                 })
             
-            eval_results.append({
-                'question': question['question'],
-                'paper_id': question['paper_id'],
-                'style': question['style'],
-                'gold_rank': gold_rank if gold_rank else 999
-            })
-        
-        # Compute metrics
-        metrics = compute_metrics(eval_results, TOP_K)
-        all_results[config_key] = metrics
-        
-        print(f"  Hit@1: {metrics['hit@1']:.3f}")
-        print(f"  Hit@10: {metrics['hit@10']:.3f}")
-        print(f"  MRR: {metrics['mrr']:.3f}")
-        print(f"  nDCG@10: {metrics['ndcg@10']:.3f}")
+            all_eval_results.extend(eval_results)
+            all_failures.extend(failures)
+            
+            # Compute metrics
+            metrics = compute_metrics(eval_results, TOP_K)
+            all_results[config_key] = metrics
+            
+            print("  Hit@1:", round(metrics['hit@1'], 3))
+            print("  Hit@10:", round(metrics['hit@10'], 3))
+            print("  MRR:", round(metrics['mrr'], 3))
+            print("  nDCG@10:", round(metrics['ndcg@10'], 3))
     
     # BM25 baseline
     print_section("BM25 Baseline")
@@ -437,12 +475,49 @@ def main():
             if chunk_id == question['chunk_id']:
                 gold_rank = i + 1
                 break
-        bm25_eval.append({'gold_rank': gold_rank if gold_rank else 999})
+        bm25_eval.append({
+            'rank': gold_rank if gold_rank else 999,
+            'field': question['paper_id'].split('_')[1],
+            'style': question['style']
+        })
     
     bm25_metrics = compute_metrics(bm25_eval, TOP_K)
-    print(f"  Hit@1: {bm25_metrics['hit@1']:.3f}")
-    print(f"  Hit@10: {bm25_metrics['hit@10']:.3f}")
-    print(f"  MRR: {bm25_metrics['mrr']:.3f}")
+    print("  Hit@1:", round(bm25_metrics['hit@1'], 3))
+    print("  Hit@10:", round(bm25_metrics['hit@10'], 3))
+    print("  MRR:", round(bm25_metrics['mrr'], 3))
+    
+    # Print grouped metrics
+    print("\n--- Metrics by Style ---")
+    style_metrics = compute_metrics_by_group(bm25_eval, 'style', TOP_K)
+    for style in ['factual', 'conceptual', 'paraphrased']:
+        if style in style_metrics:
+            m = style_metrics[style]
+            print("  " + style + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
+    
+    print("\n--- Metrics by Field ---")
+    field_metrics = compute_metrics_by_group(bm25_eval, 'field', TOP_K)
+    for field in ['NLP', 'Computer', 'Machine']:
+        if field in field_metrics:
+            m = field_metrics[field]
+            print("  " + field + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
+    
+    # Print vector config grouped metrics
+    for config_key in all_results.keys():
+        config_eval = [r for r in all_eval_results if r.get('config') == config_key]
+        
+        print("\n--- " + config_key + " by Style ---")
+        style_metrics = compute_metrics_by_group(config_eval, 'style', TOP_K)
+        for style in ['factual', 'conceptual', 'paraphrased']:
+            if style in style_metrics:
+                m = style_metrics[style]
+                print("  " + style + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
+        
+        print("\n--- " + config_key + " by Field ---")
+        field_metrics = compute_metrics_by_group(config_eval, 'field', TOP_K)
+        for field in ['NLP', 'Computer', 'Machine']:
+            if field in field_metrics:
+                m = field_metrics[field]
+                print("  " + field + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
     
     # Save results
     eval_dir = Path("eval_lab")
@@ -460,17 +535,31 @@ def main():
     # Save per_question.csv
     with open(eval_dir / "per_question.csv", 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['question', 'paper_id', 'style', 'gold_rank'])
-        for result in eval_results:
+        writer.writerow(['question', 'paper_id', 'style', 'rank'])
+        for result in all_eval_results:
             writer.writerow([
                 result['question'],
                 result['paper_id'],
                 result['style'],
-                result['gold_rank']
+                result['rank']
             ])
     
+    # Save failures.csv
+    if all_failures:
+        with open(eval_dir / "failures.csv", 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['question', 'paper_id', 'style', 'gold_rank', 'top_3'])
+            for failure in all_failures:
+                writer.writerow([
+                    failure['question'],
+                    failure['paper_id'],
+                    failure['style'],
+                    failure['gold_rank'],
+                    failure['top_3']
+                ])
+    
     print_section("Done")
-    print(f"Results saved to eval_lab/")
+    print("Results saved to eval_lab/")
 
 
 if __name__ == "__main__":
