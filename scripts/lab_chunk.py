@@ -5,6 +5,7 @@ Phase 1: Extract text and chunk into overlapping pieces
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -194,7 +195,9 @@ class RecursiveChunker:
             chunks.append({
                 "chunk_index": chunk_index,
                 "text": chunk_text,
-                "n_tokens": len(chunk_tokens)
+                "n_tokens": len(chunk_tokens),
+                "char_start": len(encoding.decode(tokens[:start])),
+                "char_end": len(encoding.decode(tokens[:end]))
             })
             
             start += (self.size - self.overlap)
@@ -339,7 +342,7 @@ def build_manifest(pdf_dir: str, config) -> List[Dict]:
     return papers
 
 
-def chunk_papers(papers: List[Dict], config, cut_references: bool = False) -> List[Dict]:
+def chunk_papers(papers: List[Dict], config, cut_references: bool = False, use_cleaned: bool = False) -> List[Dict]:
     """
     Phase 1: Chunk papers into overlapping pieces.
     Returns list of chunks with metadata.
@@ -355,20 +358,34 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False) -> Li
     )
     
     all_chunks = []
+    cleaned_dir = Path(config.data_dir) / "cleaned"
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    cleaned_manifest = {}
     
     for paper in papers:
-        pdf_path = Path(config.pdf_dir) / paper["filename"]
-        pages = parser.extract_pages(pdf_path)
-        pages = detect_and_remove_headers_footers(pages)
-        
-        # Clean and concatenate
-        full_text = ""
-        page_offsets = []  # Track where each page starts
-        
-        for page in pages:
-            cleaned = clean_text(page["text"])
-            page_offsets.append(len(full_text))
-            full_text += cleaned + "\n\n"
+        cleaned_path = cleaned_dir / f"{paper['paper_id']}.txt"
+        if use_cleaned:
+            if not cleaned_path.exists():
+                raise ValueError(f"Saved cleaned text not found: {cleaned_path}")
+            full_text = cleaned_path.read_text(encoding="utf-8")
+            pages = [{"text": full_text}]
+            page_offsets = [0]
+        else:
+            pdf_path = Path(config.pdf_dir) / paper["filename"]
+            pages = parser.extract_pages(pdf_path)
+            pages = detect_and_remove_headers_footers(pages)
+            
+            # Clean and concatenate
+            full_text = ""
+            page_offsets = []  # Track where each page starts
+            
+            for page in pages:
+                cleaned = clean_text(page["text"])
+                page_offsets.append(len(full_text))
+                full_text += cleaned + "\n\n"
+            
+            if not cleaned_path.exists():
+                cleaned_path.write_text(full_text, encoding="utf-8")
         
         # Optionally cut references
         if cut_references:
@@ -381,10 +398,17 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False) -> Li
         chunks = chunker.chunk(full_text)
         
         # Add metadata to each chunk
+        search_start = 0
         for chunk in chunks:
             chunk_text = chunk["text"]
-            char_start = full_text.find(chunk_text)
+            char_start = full_text.find(chunk_text, search_start)
+            if char_start < 0:
+                raise ValueError(
+                    f"Chunk text not found in cleaned text for {paper['paper_id']} "
+                    f"(chunk {chunk['chunk_index']})"
+                )
             char_end = char_start + len(chunk_text)
+            search_start = char_start + 1
             
             # Find page range
             page_start = 0
@@ -411,6 +435,19 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False) -> Li
         
         print(f"  {paper['paper_id']}: {len(chunks)} chunks")
     
+    cleaned_manifest_path = cleaned_dir / "manifest.json"
+    if not cleaned_manifest_path.exists():
+        cleaned_manifest = {}
+        for paper in papers:
+            cleaned_path = cleaned_dir / f"{paper['paper_id']}.txt"
+            text = cleaned_path.read_text(encoding="utf-8")
+            cleaned_manifest[paper["paper_id"]] = {
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "characters": len(text)
+            }
+        with cleaned_manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(cleaned_manifest, f, indent=2)
+
     # Save chunks
     chunks_file = Path(config.data_dir) / f"chunks_{config.chunk_size}_{config.chunk_overlap}.jsonl"
     with open(chunks_file, "w", encoding="utf-8") as f:
@@ -436,11 +473,14 @@ def main():
     parser.add_argument("--cut-references", action="store_true", help="Remove references section")
     parser.add_argument("--chunk-size", type=int, default=None, help="Chunk size in tokens (default: from config)")
     parser.add_argument("--chunk-overlap", type=int, default=None, help="Chunk overlap in tokens (default: from config)")
+    parser.add_argument("--skip-model-verification", action="store_true", help="Skip unrelated OpenRouter model verification")
+    parser.add_argument("--use-cleaned", action="store_true", help="Chunk from saved cleaned text instead of re-extracting PDFs")
     args = parser.parse_args()
     
     # Verify models first
-    print_section("Verifying OpenRouter Models")
-    verify_all_models()
+    if not args.skip_model_verification:
+        print_section("Verifying OpenRouter Models")
+        verify_all_models()
     
     config = get_config()
     
@@ -477,7 +517,12 @@ def main():
         print(f"Selected {len(papers)} papers for quick mode\n")
     
     # Chunk
-    chunks = chunk_papers(papers, config, cut_references=args.cut_references)
+    chunks = chunk_papers(
+        papers,
+        config,
+        cut_references=args.cut_references,
+        use_cleaned=args.use_cleaned
+    )
     
     print_section("Done")
     print(f"Processed {len(papers)} papers into {len(chunks)} chunks")

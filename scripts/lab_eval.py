@@ -313,32 +313,44 @@ def run_tests(
     print("  Questions containing paper ID:", invalid_count, "(expected 0)")
     print("  Result: " + ("PASS" if test_results['test_d'] else "FAIL"))
     
-    # Test d2: 256 gold span maps to exactly one chunk in 384
+    # Test d2: 256 gold span maps to one or two same-paper 384 chunks.
+    # Two matches are valid only when the center is in the 384-chunk overlap.
+    print("\nTest d2: 256->384 span mapping")
+    unique_count = 0
+    overlap_count = 0
+    invalid_count = 0
+    zero_count = 0
+
     if chunks_384:
-        print("\nTest d2: 256->384 span mapping")
-        unique_count = 0
-        multi_count = 0
-        zero_count = 0
-        
         for q in questions:
             gold_chunk = chunks_256[q['chunk_id']]
             gold_center = (gold_chunk['char_start'] + gold_chunk['char_end']) // 2
-            matches = 0
-            for c384 in chunks_384.values():
-                if c384['char_start'] <= gold_center <= c384['char_end']:
-                    matches += 1
-            if matches == 1:
+            matches = [
+                c384 for c384 in chunks_384.values()
+                if c384['paper_id'] == gold_chunk['paper_id']
+                and c384['char_start'] <= gold_center <= c384['char_end']
+            ]
+            if len(matches) == 1:
                 unique_count += 1
-            elif matches > 1:
-                multi_count += 1
-            else:
+            elif len(matches) == 2:
+                overlap_count += 1
+            elif len(matches) == 0:
                 zero_count += 1
-        
-        test_results['test_d2'] = zero_count == 0
-        print("  Unique mappings:", unique_count, "/" + str(len(questions)))
-        print("  Multi-mappings:", multi_count, "/" + str(len(questions)) + " (allowed in overlap regions)")
-        print("  Zero-mappings:", zero_count, "/" + str(len(questions)) + " (must be 0)")
-        print("  Result: " + ("PASS" if test_results['test_d2'] else "FAIL"))
+            else:
+                invalid_count += 1
+    else:
+        invalid_count = len(questions)
+
+    test_results['test_d2'] = (
+        bool(chunks_384)
+        and zero_count == 0
+        and invalid_count == 0
+    )
+    print("  Unique mappings:", unique_count, "/" + str(len(questions)))
+    print("  Overlap mappings:", overlap_count, "/" + str(len(questions)) + " (allowed)")
+    print("  Invalid mappings:", invalid_count, "/" + str(len(questions)) + " (must be 0)")
+    print("  Zero-mappings:", zero_count, "/" + str(len(questions)) + " (must be 0)")
+    print("  Result: " + ("PASS" if test_results['test_d2'] else "FAIL"))
     
     return test_results
 
