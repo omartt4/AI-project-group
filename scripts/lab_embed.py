@@ -319,8 +319,10 @@ class LocalEmbedder:
     
     def check_chunk_lengths(self, chunks: List[Dict]) -> tuple[int, int, int]:
         """
-        Check chunk lengths using the model's tokenizer.
+        Check chunk lengths using the model's tokenizer with special tokens included.
         Returns (max_tokens, mean_tokens, num_exceeding).
+        Note: Chunk size is defined in tiktoken (cl100k_base) tokens, but this check uses
+        the bge-small tokenizer to ensure chunks don't exceed the model's context limit.
         """
         if not hasattr(self.model, 'tokenizer'):
             print_warning("Model has no tokenizer, using word count as fallback")
@@ -330,17 +332,10 @@ class LocalEmbedder:
         token_counts = []
         for chunk in chunks:
             text = chunk.get("text", "")
-            # Use preprocess method (non-deprecated) to get token count
+            # Use the model's tokenizer directly with special tokens included
             try:
-                # preprocess returns a dict with 'input_ids' or similar
-                processed = self.model.preprocess([text])
-                if isinstance(processed, dict) and 'input_ids' in processed:
-                    count = len(processed['input_ids'][0]) if isinstance(processed['input_ids'], list) else len(processed['input_ids'])
-                elif isinstance(processed, list) and len(processed) > 0:
-                    count = len(processed[0]) if isinstance(processed[0], list) else len(processed)
-                else:
-                    # Fallback to word count
-                    count = len(text.split())
+                tokens = self.model.tokenizer(text, add_special_tokens=True)
+                count = len(tokens['input_ids'])
             except Exception as e:
                 print_warning(f"Tokenizer error: {e}, using word count fallback")
                 count = len(text.split())
@@ -489,19 +484,28 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
         # Check chunk lengths against model's max sequence length
         print_section("Checking Chunk Lengths")
         max_tokens, mean_tokens, num_exceeding = embedder.check_chunk_lengths(chunks)
-        print(f"  Max chunk tokens (model tokenizer): {max_tokens}")
-        print(f"  Mean chunk tokens (model tokenizer): {mean_tokens}")
-        print(f"  Model max sequence length: {embedder.max_seq_length}")
-        print(f"  Chunks exceeding limit: {num_exceeding}/{len(chunks)}")
+        print(f"  Max chunk tokens (bge-small tokenizer, special tokens included): {max_tokens}")
+        print(f"  Mean chunk tokens (bge-small tokenizer, special tokens included): {mean_tokens}")
+        print(f"  Note: Chunk size is defined in tiktoken (cl100k_base) tokens")
+        print(f"  Chunks exceeding 480 tokens: {num_exceeding}/{len(chunks)}")
+        
+        # Store for report
+        chunk_stats = {
+            "max_tokens_bge": max_tokens,
+            "mean_tokens_bge": mean_tokens,
+            "num_exceeding_480": num_exceeding,
+            "chunk_size_tiktoken": chunk_size,
+            "chunk_overlap_tiktoken": chunk_overlap
+        }
         
         if num_exceeding > 0 and not allow_truncation:
-            print_error(f"{num_exceeding} chunks exceed model max sequence length ({embedder.max_seq_length})")
+            print_error(f"{num_exceeding} chunks exceed 480 tokens (bge-small tokenizer)")
             print_error("This would cause silent truncation and invalid embeddings.")
             print_error("Re-run with --allow-truncation to proceed anyway (not recommended),")
             print_error("or re-chunk with a smaller chunk size (recommended: <= 256 for BGE-small).")
             sys.exit(1)
         elif num_exceeding > 0:
-            print_warning(f"{num_exceeding} chunks exceed model max sequence length - proceeding with potential truncation")
+            print_warning(f"{num_exceeding} chunks exceed 480 tokens - proceeding with potential truncation")
     else:
         # Verify models for OpenRouter
         verify_all_models()
@@ -516,6 +520,9 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
         )
         embed_dim = config.embed_dim or embedder.context_length
         model_context = embedder.context_length
+        
+        # No chunk stats for OpenRouter
+        chunk_stats = {}
     
     # Estimate usage
     model_tag = actual_model.replace("/", "_").replace(":", "_")
@@ -723,7 +730,8 @@ def embed_and_store(chunks_file: str, model_id: str, mode: str, config, confirm:
             "batch_size": config.batch_size,
             "model_context": model_context,
             "http_status_codes": getattr(embedder, 'http_status_codes', []),
-            "manifest_papers": len(manifest) if manifest else 0
+            "manifest_papers": len(manifest) if manifest else 0,
+            "chunk_stats": chunk_stats if config.embed_backend == "local" else {}
         }
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)

@@ -61,13 +61,14 @@ def load_chunks(chunks_path: Path) -> Dict[str, Dict]:
 
 
 def check_token_lengths(chunks: List[Dict], model_name: str = "BAAI/bge-small-en-v1.5") -> Tuple[int, int]:
-    """Check that no chunk exceeds MAX_MODEL_TOKENS using the model's tokenizer."""
-    tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")  # Approximation for bge-small
+    """Check that no chunk exceeds MAX_MODEL_TOKENS using the bge-small tokenizer with special tokens included."""
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     max_len = 0
     exceeding = 0
     for chunk in chunks:
         text = chunk['text']
-        tokens = len(tokenizer.encode(text))
+        tokens = len(tokenizer(text, add_special_tokens=True)['input_ids'])
         max_len = max(max_len, tokens)
         if tokens > MAX_MODEL_TOKENS:
             exceeding += 1
@@ -81,16 +82,22 @@ def get_gold_span(question: Dict, chunks: Dict[str, Dict]) -> Tuple[str, int, in
     return gold_chunk['text'], gold_chunk['char_start'], gold_chunk['char_end']
 
 
-def strict_hit(retrieved_chunk: Dict, gold_text: str, gold_start: int, gold_end: int) -> bool:
-    """Check if retrieved chunk contains the gold span's center."""
+def strict_hit(retrieved_chunk: Dict, gold_paper_id: str, gold_text: str, gold_start: int, gold_end: int) -> bool:
+    """Check if retrieved chunk is from correct paper and contains the gold span's center."""
+    # Must be from correct paper
+    if retrieved_chunk.get('paper_id') != gold_paper_id:
+        return False
     gold_center = (gold_start + gold_end) // 2
     chunk_start = retrieved_chunk.get('char_start', 0)
     chunk_end = retrieved_chunk.get('char_end', len(retrieved_chunk['text']))
     return chunk_start <= gold_center <= chunk_end
 
 
-def lenient_hit(retrieved_chunk: Dict, gold_text: str, gold_start: int, gold_end: int) -> bool:
-    """Check if retrieved chunk overlaps gold span or is adjacent."""
+def lenient_hit(retrieved_chunk: Dict, gold_paper_id: str, gold_text: str, gold_start: int, gold_end: int) -> bool:
+    """Check if retrieved chunk is from correct paper and overlaps gold span or is adjacent."""
+    # Must be from correct paper
+    if retrieved_chunk.get('paper_id') != gold_paper_id:
+        return False
     chunk_start = retrieved_chunk.get('char_start', 0)
     chunk_end = retrieved_chunk.get('char_end', len(retrieved_chunk['text']))
     
@@ -236,41 +243,50 @@ def run_tests(
     print_section("Running Tests")
     
     test_results = {}
-    
-    # Test a: Chunk text as query should give Hit@1
-    print("\nTest a: Chunk text as query (self-retrieval)")
-    sample_chunks = list(chunks_256.values())[:10]
-    hit_count = 0
-    collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, 256, 26, "vector")
     config = get_config()
     client = chromadb.PersistentClient(path=config.chroma_dir, settings=Settings(anonymized_telemetry=False))
-    collection = client.get_collection(name=collection_name)
     
-    for chunk in sample_chunks:
-        query_embedding = model.encode(chunk['text'], normalize_embeddings=True)
-        retrieved = collection.query(query_embeddings=[query_embedding.tolist()], n_results=1)
-        if retrieved['ids'][0][0] == chunk['chunk_id']:
-            hit_count += 1
-    hit_rate = hit_count / len(sample_chunks)
-    test_results['test_a'] = hit_rate >= 0.8
-    print("  Hit@1:", round(hit_rate, 1), "(expected >= 80%)")
-    print("  Result:", "PASS" if test_results['test_a'] else "FAIL")
+    # Test a: Chunk text as query should give Hit@1 (for both 256 and 384)
+    print("\nTest a: Chunk text as query (self-retrieval)")
+    for chunk_size in [256, 384]:
+        chunks = chunks_256 if chunk_size == 256 else chunks_384
+        if not chunks:
+            continue
+        sample_chunks = list(chunks.values())[:10]
+        hit_count = 0
+        collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, chunk_size, 26 if chunk_size == 256 else 38, "vector")
+        collection = client.get_collection(name=collection_name)
+        
+        for chunk in sample_chunks:
+            query_embedding = model.encode(chunk['text'], normalize_embeddings=True)
+            retrieved = collection.query(query_embeddings=[query_embedding.tolist()], n_results=1)
+            if retrieved['ids'][0][0] == chunk['chunk_id']:
+                hit_count += 1
+        hit_rate = hit_count / len(sample_chunks)
+        test_results[f'test_a_{chunk_size}'] = hit_rate >= 0.8
+        print(f"  {chunk_size}: Hit@1:", round(hit_rate, 1), "(expected >= 80%)")
+        print(f"  Result:", "PASS" if test_results[f'test_a_{chunk_size}'] else "FAIL")
     
-    # Test b: Shuffled gold control
+    # Test b: Shuffled gold control (for both 256 and 384)
     print("\nTest b: Shuffled gold control")
-    shuffled_questions = []
-    chunk_ids = list(chunks_256.keys())
-    for q in questions:
-        shuffled_q = q.copy()
-        shuffled_q['chunk_id'] = random.choice(chunk_ids)
-        shuffled_questions.append(shuffled_q)
-    
-    retrieval = run_vector_retrieval(shuffled_questions, chunks_256, collection_name, model, "", top_k=10)
-    hit_count = sum(1 for r in retrieval if r['retrieved']['ids'][0][0] == r['question']['chunk_id'])
-    hit_rate = hit_count / len(shuffled_questions)
-    test_results['test_b'] = hit_rate < 0.2
-    print("  Hit@10:", round(hit_rate, 1), "(expected < 20%)")
-    print("  Result:", "PASS" if test_results['test_b'] else "FAIL")
+    for chunk_size in [256, 384]:
+        chunks = chunks_256 if chunk_size == 256 else chunks_384
+        if not chunks:
+            continue
+        shuffled_questions = []
+        chunk_ids = list(chunks.keys())
+        for q in questions:
+            shuffled_q = q.copy()
+            shuffled_q['chunk_id'] = random.choice(chunk_ids)
+            shuffled_questions.append(shuffled_q)
+        
+        collection_name = get_collection_name("BAAI_bge-small-en-v1.5", 384, chunk_size, 26 if chunk_size == 256 else 38, "vector")
+        retrieval = run_vector_retrieval(shuffled_questions, chunks, collection_name, model, "", top_k=10)
+        hit_count = sum(1 for r in retrieval if r['retrieved']['ids'][0][0] == r['question']['chunk_id'])
+        hit_rate = hit_count / len(shuffled_questions)
+        test_results[f'test_b_{chunk_size}'] = hit_rate < 0.2
+        print(f"  {chunk_size}: Hit@10:", round(hit_rate, 1), "(expected < 20%)")
+        print(f"  Result:", "PASS" if test_results[f'test_b_{chunk_size}'] else "FAIL")
     
     # Test c: Tiny hand-made corpus
     print("\nTest c: Hand-made corpus test")
@@ -352,6 +368,32 @@ def run_tests(
     print("  Zero-mappings:", zero_count, "/" + str(len(questions)) + " (must be 0)")
     print("  Result: " + ("PASS" if test_results['test_d2'] else "FAIL"))
     
+    # Unit test: strict_hit should reject chunks from other papers
+    print("\nUnit test: strict_hit paper_id check")
+    test_chunk_other_paper = {
+        'paper_id': 'other_paper',
+        'char_start': 0,
+        'char_end': 1000,
+        'text': 'some text'
+    }
+    test_result = strict_hit(test_chunk_other_paper, 'gold_paper', 'gold text', 500, 600)
+    if not test_result:
+        print("  PASS: Chunk from other paper rejected even with correct offset")
+    else:
+        print("  FAIL: Chunk from other paper incorrectly accepted")
+    
+    test_chunk_correct_paper = {
+        'paper_id': 'gold_paper',
+        'char_start': 0,
+        'char_end': 1000,
+        'text': 'some text'
+    }
+    test_result = strict_hit(test_chunk_correct_paper, 'gold_paper', 'gold text', 500, 600)
+    if test_result:
+        print("  PASS: Chunk from correct paper accepted with correct offset")
+    else:
+        print("  FAIL: Chunk from correct paper incorrectly rejected")
+    
     return test_results
 
 
@@ -375,11 +417,12 @@ def main():
     
     # Check token lengths
     exceeding_256, max_256 = check_token_lengths(list(chunks_256.values()))
-    print("Chunk 256:", exceeding_256, "chunks exceed", MAX_MODEL_TOKENS, "tokens (max:", max_256, ")")
+    print("Chunk 256:", exceeding_256, "chunks exceed 480 tokens (bge-small tokenizer, max:", max_256, ")")
+    print("  Note: Chunk size is defined in tiktoken (cl100k_base) tokens")
     
     if chunks_384:
         exceeding_384, max_384 = check_token_lengths(list(chunks_384.values()))
-        print("Chunk 384:", exceeding_384, "chunks exceed", MAX_MODEL_TOKENS, "tokens (max:", max_384, ")")
+        print("Chunk 384:", exceeding_384, "chunks exceed 480 tokens (bge-small tokenizer, max:", max_384, ")")
     
     # Load embedding model
     print_section("Loading Embedding Model")
@@ -405,7 +448,7 @@ def main():
     all_eval_results = []
     all_failures = []
     
-    for chunk_size in [256]:  # Only 256 for now, 384 needs separate collection
+    for chunk_size in [256, 384]:
         chunks = chunks_256 if chunk_size == 256 else chunks_384
         if not chunks:
             continue
@@ -436,14 +479,24 @@ def main():
                 question = result['question']
                 retrieved = result['retrieved']
                 
-                gold_text, gold_start, gold_end = get_gold_span(question, chunks)
+                # Always use 256 chunks for gold span (questions reference 256 chunk_ids)
+                gold_text, gold_start, gold_end = get_gold_span(question, chunks_256)
                 
-                # Find gold rank
+                # Find gold rank using hit rule (strict or lenient)
                 gold_rank = None
                 for i, chunk_id in enumerate(retrieved['ids'][0]):
-                    if chunk_id == question['chunk_id']:
-                        gold_rank = i + 1
-                        break
+                    if chunk_id in chunks:
+                        retrieved_chunk = chunks[chunk_id]
+                        # For 256 config, use exact chunk_id match
+                        # For 384 config, use strict hit rule (gold span center in retrieved chunk)
+                        if chunk_size == 256:
+                            if chunk_id == question['chunk_id']:
+                                gold_rank = i + 1
+                                break
+                        else:  # 384 config
+                            if strict_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
+                                gold_rank = i + 1
+                                break
                 
                 if gold_rank is None or gold_rank > 10:
                     failures.append({
@@ -471,60 +524,71 @@ def main():
             all_results[config_key] = metrics
             
             print("  Hit@1:", round(metrics['hit@1'], 3))
+            print("  Hit@3:", round(metrics['hit@3'], 3))
+            print("  Hit@5:", round(metrics['hit@5'], 3))
             print("  Hit@10:", round(metrics['hit@10'], 3))
+            print("  Recall@10:", round(metrics['recall@10'], 3))
             print("  MRR:", round(metrics['mrr'], 3))
             print("  nDCG@10:", round(metrics['ndcg@10'], 3))
     
-    # BM25 baseline
+    # BM25 baseline for both chunk sizes
     print_section("BM25 Baseline")
-    bm25_results = run_bm25_retrieval(questions, chunks_256)
-    bm25_eval = []
-    for result in bm25_results:
-        question = result['question']
-        retrieved = result['retrieved']
-        gold_rank = None
-        for i, chunk_id in enumerate(retrieved['ids']):
-            if chunk_id == question['chunk_id']:
-                gold_rank = i + 1
-                break
-        bm25_eval.append({
-            'rank': gold_rank if gold_rank else 999,
-            'field': question['paper_id'].split('_')[1],
-            'style': question['style']
-        })
     
-    bm25_metrics = compute_metrics(bm25_eval, TOP_K)
-    print("  Hit@1:", round(bm25_metrics['hit@1'], 3))
-    print("  Hit@10:", round(bm25_metrics['hit@10'], 3))
-    print("  MRR:", round(bm25_metrics['mrr'], 3))
+    for chunk_size in [256, 384]:
+        chunks = chunks_256 if chunk_size == 256 else chunks_384
+        if not chunks:
+            continue
+        
+        print(f"\nBM25 {chunk_size}:")
+        bm25_results = run_bm25_retrieval(questions, chunks)
+        bm25_eval = []
+        
+        for result in bm25_results:
+            question = result['question']
+            retrieved = result['retrieved']
+            
+            # Always use 256 chunks for gold span
+            gold_text, gold_start, gold_end = get_gold_span(question, chunks_256)
+            
+            # Find gold rank using strict hit rule
+            gold_rank = None
+            for i, chunk_id in enumerate(retrieved['ids']):
+                if chunk_id in chunks:
+                    retrieved_chunk = chunks[chunk_id]
+                    if strict_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
+                        gold_rank = i + 1
+                        break
+            
+            bm25_eval.append({
+                'rank': gold_rank if gold_rank else 999,
+                'field': question['paper_id'].split('_')[1],
+                'style': question['style']
+            })
+        
+        bm25_metrics = compute_metrics(bm25_eval, TOP_K)
+        all_results[f"BM25_{chunk_size}"] = bm25_metrics
+        print("  Hit@1:", round(bm25_metrics['hit@1'], 3))
+        print("  Hit@3:", round(bm25_metrics['hit@3'], 3))
+        print("  Hit@5:", round(bm25_metrics['hit@5'], 3))
+        print("  Hit@10:", round(bm25_metrics['hit@10'], 3))
+        print("  Recall@10:", round(bm25_metrics['recall@10'], 3))
+        print("  MRR:", round(bm25_metrics['mrr'], 3))
+        print("  nDCG@10:", round(bm25_metrics['ndcg@10'], 3))
     
-    # Print grouped metrics
-    print("\n--- Metrics by Style ---")
-    style_metrics = compute_metrics_by_group(bm25_eval, 'style', TOP_K)
-    for style in ['factual', 'conceptual', 'paraphrased']:
-        if style in style_metrics:
-            m = style_metrics[style]
-            print("  " + style + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
-    
-    print("\n--- Metrics by Field ---")
-    field_metrics = compute_metrics_by_group(bm25_eval, 'field', TOP_K)
-    for field in ['NLP', 'Computer', 'Machine']:
-        if field in field_metrics:
-            m = field_metrics[field]
-            print("  " + field + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
-    
-    # Print vector config grouped metrics
+    # Print grouped metrics (skip BM25 configs here)
     for config_key in all_results.keys():
+        if config_key.startswith('BM25'):
+            continue
         config_eval = [r for r in all_eval_results if r.get('config') == config_key]
         
-        print("\n--- " + config_key + " by Style ---")
+        print("\n--- " + config_key + " by Style (strict) ---")
         style_metrics = compute_metrics_by_group(config_eval, 'style', TOP_K)
         for style in ['factual', 'conceptual', 'paraphrased']:
             if style in style_metrics:
                 m = style_metrics[style]
                 print("  " + style + ": Hit@1=" + str(round(m['hit@1'], 3)) + ", Hit@10=" + str(round(m['hit@10'], 3)) + ", MRR=" + str(round(m['mrr'], 3)) + " (n=" + str(m['n']) + ")")
         
-        print("\n--- " + config_key + " by Field ---")
+        print("\n--- " + config_key + " by Field (strict) ---")
         field_metrics = compute_metrics_by_group(config_eval, 'field', TOP_K)
         for field in ['NLP', 'Computer', 'Machine']:
             if field in field_metrics:
@@ -569,6 +633,22 @@ def main():
                     failure['gold_rank'],
                     failure['top_3']
                 ])
+    
+    # Save sweep_summary.csv
+    with open(eval_dir / "sweep_summary.csv", 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['config', 'hit@1', 'hit@3', 'hit@5', 'hit@10', 'recall@10', 'mrr', 'ndcg@10'])
+        for config_key, metrics in all_results.items():
+            writer.writerow([
+                config_key,
+                round(metrics['hit@1'], 4),
+                round(metrics.get('hit@3', 0), 4),
+                round(metrics.get('hit@5', 0), 4),
+                round(metrics['hit@10'], 4),
+                round(metrics.get('recall@10', 0), 4),
+                round(metrics['mrr'], 4),
+                round(metrics.get('ndcg@10', 0), 4)
+            ])
     
     print_section("Done")
     print("Results saved to eval_lab/")

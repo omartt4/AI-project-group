@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Re-chunk existing chunks with new size/overlap."""
+import json
+import tiktoken
+from pathlib import Path
+
+# Load original chunks
+chunks = [json.loads(line) for line in open('data/lab/chunks_256_26.jsonl')]
+
+# Group by paper
+papers = {}
+for c in chunks:
+    pid = c['paper_id']
+    if pid not in papers:
+        papers[pid] = []
+    papers[pid].append(c)
+
+# Re-chunk each paper
+tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")
+new_chunks = []
+chunk_size = 384
+chunk_overlap = 38
+
+for paper_id, paper_chunks in papers.items():
+    # Concatenate all text (sorted by char_start)
+    full_text = ""
+    for c in sorted(paper_chunks, key=lambda x: x['char_start']):
+        full_text += c['text'] + " "
+    
+    # Chunk by tokens
+    tokens = tokenizer.encode(full_text)
+    i = 0
+    chunk_idx = 0
+    
+    while i < len(tokens):
+        end = min(i + chunk_size, len(tokens))
+        chunk_tokens = tokens[i:end]
+        chunk_text = tokenizer.decode(chunk_tokens)
+        
+        # Get character span (approximate)
+        char_start = len(tokenizer.decode(tokens[:i]))
+        char_end = len(tokenizer.decode(tokens[:end]))
+        
+        # Get field from paper_id
+        field = paper_id.split('_')[1]
+        
+        # Get page range from original chunks (approximate)
+        page_start = paper_chunks[0].get('page_start', 0)
+        page_end = paper_chunks[-1].get('page_end', 0)
+        
+        new_chunks.append({
+            'chunk_index': chunk_idx,
+            'chunk_id': f"{paper_id}_{chunk_idx}",
+            'paper_id': paper_id,
+            'field': field,
+            'text': chunk_text,
+            'n_tokens': len(chunk_tokens),
+            'char_start': char_start,
+            'char_end': char_end,
+            'page_start': page_start,
+            'page_end': page_end,
+            'entities': []
+        })
+        
+        i += chunk_size - chunk_overlap
+        chunk_idx += 1
+
+# Check token lengths
+max_tokens = 0
+exceeding = 0
+for c in new_chunks:
+    tokens = len(tokenizer.encode(c['text']))
+    max_tokens = max(max_tokens, tokens)
+    if tokens > 480:
+        exceeding += 1
+
+print("Created", len(new_chunks), "chunks")
+print("Max tokens:", max_tokens)
+print("Exceeding 480:", exceeding)
+
+# Save
+with open('data/lab/chunks_384_38.jsonl', 'w', encoding='utf-8') as f:
+    for c in new_chunks:
+        f.write(json.dumps(c) + '\n')
+
+print("Saved to data/lab/chunks_384_38.jsonl")

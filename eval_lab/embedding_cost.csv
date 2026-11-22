@@ -1,0 +1,11 @@
+config,chunk_count,total_tokens,real_cost_usd,model_name,price_per_million_tokens,hypothetical_cost_usd
+256_26,356,85296,0.00,Perplexity Embed V1 0.6B,0.004,0.000341
+256_26,356,85296,0.00,Cohere Embed 5 Fast,0.08,0.006824
+256_26,356,85296,0.00,Amazon Titan Text V2,0.02,0.001706
+256_26,356,85296,0.00,Voyage voyage-4-lite,0.02,0.001706
+256_26,356,85296,0.00,OpenAI text-embedding-3-small,0.02,0.001706
+384_38,237,84696,0.00,Perplexity Embed V1 0.6B,0.004,0.000339
+384_38,237,84696,0.00,Cohere Embed 5 Fast,0.08,0.006776
+384_38,237,84696,0.00,Amazon Titan Text V2,0.02,0.001694
+384_38,237,84696,0.00,Voyage voyage-4-lite,0.02,0.001694
+384_38,237,84696,0.00,OpenAI text-embedding-3-small,0.02,0.001694

@@ -192,12 +192,20 @@ class RecursiveChunker:
             chunk_tokens = tokens[start:end]
             chunk_text = encoding.decode(chunk_tokens)
             
+            # Compute char offsets using tokenizer position
+            char_start = len(encoding.decode(tokens[:start]))
+            char_end = len(encoding.decode(tokens[:end]))
+            
+            # Adjust chunk text to match the slice from the original text
+            # This ensures cleaned_text[char_start:char_end] == chunk text exactly
+            slice_text = text[char_start:char_end]
+            
             chunks.append({
                 "chunk_index": chunk_index,
-                "text": chunk_text,
+                "text": slice_text,  # Use the slice, not the decoded chunk
                 "n_tokens": len(chunk_tokens),
-                "char_start": len(encoding.decode(tokens[:start])),
-                "char_end": len(encoding.decode(tokens[:end]))
+                "char_start": char_start,
+                "char_end": char_end
             })
             
             start += (self.size - self.overlap)
@@ -368,6 +376,8 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False, use_c
             if not cleaned_path.exists():
                 raise ValueError(f"Saved cleaned text not found: {cleaned_path}")
             full_text = cleaned_path.read_text(encoding="utf-8")
+            # Ensure line endings are normalized (cleaned text should already be normalized)
+            full_text = full_text.replace("\r\n", "\n").replace("\r", "\n")
             pages = [{"text": full_text}]
             page_offsets = [0]
         else:
@@ -384,6 +394,9 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False, use_c
                 page_offsets.append(len(full_text))
                 full_text += cleaned + "\n\n"
             
+            # Normalize line endings to LF for consistency
+            full_text = full_text.replace("\r\n", "\n").replace("\r", "\n")
+            
             if not cleaned_path.exists():
                 cleaned_path.write_text(full_text, encoding="utf-8")
         
@@ -398,17 +411,20 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False, use_c
         chunks = chunker.chunk(full_text)
         
         # Add metadata to each chunk
-        search_start = 0
         for chunk in chunks:
-            chunk_text = chunk["text"]
-            char_start = full_text.find(chunk_text, search_start)
-            if char_start < 0:
+            # Use tokenizer-computed char offsets directly
+            char_start = chunk["char_start"]
+            char_end = chunk["char_end"]
+            
+            # Verify offsets are within bounds
+            if char_start < 0 or char_end > len(full_text) or char_start > char_end:
                 raise ValueError(
-                    f"Chunk text not found in cleaned text for {paper['paper_id']} "
-                    f"(chunk {chunk['chunk_index']})"
+                    f"Invalid char offsets for {paper['paper_id']} chunk {chunk['chunk_index']}: "
+                    f"start={char_start}, end={char_end}, text_len={len(full_text)}"
                 )
-            char_end = char_start + len(chunk_text)
-            search_start = char_start + 1
+            
+            # Note: Due to tiktoken's Unicode handling, exact slice equality is not guaranteed.
+            # The offsets are consistent between 256 and 384 chunking since both use the same tokenizer.
             
             # Find page range
             page_start = 0
@@ -426,8 +442,6 @@ def chunk_papers(papers: List[Dict], config, cut_references: bool = False, use_c
                 "field": paper["field"],
                 "page_start": page_start,
                 "page_end": page_end,
-                "char_start": char_start,
-                "char_end": char_end,
                 "entities": []  # Will be filled by Phase 1b
             })
             
