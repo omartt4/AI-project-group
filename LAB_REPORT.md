@@ -105,30 +105,75 @@ Evaluation (lab_eval.py)
 ## 7. Entities
 
 **Extractor:** YAKE (Yet Another Keyword Extractor)
-- Stopwords: NLTK stopwords
+- Stopwords: NLTK stopwords (downloaded automatically), with sklearn ENGLISH_STOP_WORDS as fallback
 - Max entities per chunk: 8
 - Max entities per paper: 50
-- Min paper frequency: 2
+- Min paper frequency: 2 (default, terms must appear in at least 2 papers to be kept in paper_entities.json)
+- Document frequency threshold: 6 (default, terms appearing in >= 6 of 9 papers are dropped from chunks)
+
+**Filtering stages (256/26 config):**
+- Step 1 (validity filter): 0 removed (0.0%) - stopwords, length, etc.
+- Step 6 (doc-freq filter): 1 removed (0.0%) - terms appearing in >= 6 papers
+- Step 7 (min_paper_freq): 2762 removed (99.1%) - terms appearing in < 2 papers (paper-level only)
+
+**Filtering stages (384/38 config):**
+- Step 1 (validity filter): 0 removed (0.0%) - stopwords, length, etc.
+- Step 6 (doc-freq filter): 0 removed (0.0%) - terms appearing in >= 6 papers
+- Step 7 (min_paper_freq): 1870 removed (99.4%) - terms appearing in < 2 papers (paper-level only)
 
 **Storage:** Entities stored in chunk JSON files but not used in retrieval.
 
-**Sample chunks with entities:** 20 random chunks all have non-empty entities.
+**Entity statistics (256/26 config):**
+- Mean entities per chunk: 7.90
+- Median entities per chunk: 8
+- Chunks with 0 entities: 0/356 (0.0%)
+- Chunks with fewer than 8 entities: 9/356 (2.5%)
+- Max entities per chunk: 8
 
-**Top terms per paper:** (from check_entities_summary.py output)
-- Paper-specific top 10 terms extracted and stored.
+**Entity statistics (384/38 config):**
+- Mean entities per chunk: 7.99
+- Median entities per chunk: 8
+- Chunks with 0 entities: 0/237 (0.0%)
+- Chunks with fewer than 8 entities: 0/237 (0.0%)
+- Max entities per chunk: 8
+
+**Document frequency filtering:**
+- 256/26: 18 terms dropped (model, results, table, figure, fig, data, network, networks, dataset, datasets, precision, learning, deep learning, neural, experiments, set, models, wang)
+- 384/38: 8 terms dropped (results, figure, dataset, network, learning, data, model, precision)
+- Verified: 0 entities in final chunk files match dropped terms
+
+**Residual noise:**
+- About 0.4% of entities contain digits, "fig" or a URL because chunks contain reference and header text
+- Chunks must not change, so this noise is accepted
+- Examples: "crawls 2008-2017 contexts", "shown in fig", "url http"
 
 ## 8. Question Generation
 
 **Model:** google/gemma-4-31b-it:free (via OpenRouter)
-- Chat requests used: ~49 questions generated
+- Chat requests used: 49 questions generated
 - Styles: factual, conceptual, paraphrased
 - Filter counts:
   - 49 generated
   - 10 removed (2 from 002 chunks 18/24 due to text mismatch, 8 due to title-words filter)
   - 39 final questions
+- Pipeline order: Question generation runs after chunking and embedding, before evaluation
 
-**15 sample questions:** (from lab_qgen.py output)
-- Distributed across papers and styles
+**15 sample questions:**
+1. What assumption underlies clustering-based diarization methods regarding speaker presence per frame? (001_NLP, factual)
+2. How is speaker permutation ambiguity resolved between the two speakers and the frame indices? (001_NLP, conceptual)
+3. What is the DER of the x-vector AHC + VB + OVL + Proposed method on DIHARD II eval? (001_NLP, paraphrased)
+4. What is the primary challenge addressed by distant supervised relation extraction in knowledge base construction? (002_NLP, factual)
+5. How is the relation representation formed as a query vector in the RA-CapNet model? (002_NLP, conceptual)
+6. What types of user constraints can automated itinerary planning systems not incorporate according to the text? (003_NLP, factual)
+7. What two metrics are used to evaluate the inclusion/exclusion phrase mining task and how do they differ in measuring correctness? (003_NLP, conceptual)
+8. What does the BERT classifier output for the sentence about the wheelchair and turnstile, and how does the 11-class classifier label this example? (003_NLP, paraphrased)
+9. What is the main challenge for proposing better methods in leaf segmentation and counting with deep learning according to the abstract? (035_CV, factual)
+10. What was the best SBD achieved in the Komatsuna dataset and what abs. DiC value did the model obtain at a threshold of 0.6? (035_CV, paraphrased)
+11. What two main components make up the visual localization network proposed in the paper? (041_CV, factual)
+12. What is the purpose of combining high-level and mid-level feature layers in place recognition under severe appearance changes? (041_CV, factual)
+13. What is the role of the depth completion network in the multi-sensor fusion framework for 3D object detection? (045_CV, factual)
+14. What clinical data sources are used for accurate ICD10 code predictions in the ensemble model? (072_ML, factual)
+15. What is the HOP (Higher-Order Proximity) defined as in the H2NT network transformation framework? (074_ML, conceptual)
 
 ## 9. Results
 
@@ -168,26 +213,29 @@ Evaluation (lab_eval.py)
 | 256_none | Computer | 13 | 0.538 | 0.769 | 0.846 | 0.923 | 0.655 |
 | 256_none | Machine | 12 | 0.667 | 0.833 | 1.000 | 1.000 | 0.785 |
 | 256_instruction | NLP | 14 | 0.500 | 0.786 | 0.857 | 0.929 | 0.657 |
-| 256_instruction | Computer | 13 | 0.538 | 0.923 | 0.923 | 0.846 | 0.641 |
+| 256_instruction | Computer | 13 | 0.538 | 0.846 | 0.846 | 0.846 | 0.641 |
 | 256_instruction | Machine | 12 | 0.667 | 0.917 | 0.917 | 1.000 | 0.792 |
 | 384_none | NLP | 14 | 0.643 | 0.786 | 0.929 | 0.929 | 0.741 |
 | 384_none | Computer | 13 | 0.538 | 0.769 | 0.923 | 0.923 | 0.676 |
 | 384_none | Machine | 12 | 0.583 | 0.917 | 0.917 | 1.000 | 0.753 |
 | 384_instruction | NLP | 14 | 0.786 | 0.857 | 0.929 | 0.929 | 0.805 |
 | 384_instruction | Computer | 13 | 0.538 | 0.769 | 0.923 | 0.923 | 0.682 |
-| 384_instruction | Machine | 12 | 0.583 | 0.833 | 0.667 | 1.000 | 0.748 |
+| 384_instruction | Machine | 12 | 0.583 | 0.833 | 1.000 | 1.000 | 0.748 |
 
 **BM25 vs Vector:**
-- BM25_256 outperforms vector configs on Hit@1 (0.718 vs 0.590)
-- BM25_384 outperforms vector configs on Hit@1 (0.641 vs 0.590)
-- BM25 achieves perfect Hit@10 (1.000) for both configs
+- BM25_256 achieves higher Hit@1 than vector configs (0.718 vs 0.590 for 256_none)
+- BM25_384 achieves higher Hit@1 than vector configs (0.641 vs 0.590 for 384_none)
+- BM25 achieves perfect Hit@10 (1.000) for both configs, while vector configs achieve 0.949
+- Note: BM25's advantage may be due to the small dataset size and question characteristics; results are not statistically significant given only 39 questions
 
 **Failure Analysis:**
-- Total failures: 10 (across all configs)
-- 5 unique questions failing consistently:
-  1. "What is the first step in the proposed method to obtain initial diarization results?" (001_NLP, factual) - gold rank: not in top 50
-  2. "How does the feature extraction network output a tensor of size a*b*M for each layer, and what do a*b and M represent?" (041_CV, conceptual) - gold rank: not in top 50
-  3. "What fixed learning rate and batch size were used to train the localization network..." (041_CV, conceptual) - gold rank: not in top 50
+- Total failures: 16 (across 4 configs × 39 questions = 156 retrieval attempts)
+- 5 unique questions failing (gold chunk not in top 10):
+  1. "What is the first step in the proposed method to obtain initial diarization results?" (001_NLP, factual) - fails in all 4 configs
+  2. "How does the feature extraction network output a tensor of size a*b*M for each layer, and what do a*b and M represent?" (041_CV, conceptual) - fails in all 4 configs
+  3. "What fixed learning rate and batch size were used to train the localization network..." (041_CV, conceptual) - fails in all 4 configs
+  4. "What does the BERT classifier output for the sentence about the wheelchair and turnstile..." (003_NLP, paraphrased) - fails in 2 configs (256_instruction, 384_instruction)
+  5. "What was the best SBD achieved in the Komatsuna dataset..." (035_CV, paraphrased) - fails in 2 configs (256_none, 384_none)
 
 ## 10. Conclusions and Limitations
 
@@ -198,9 +246,92 @@ Evaluation (lab_eval.py)
 - 384 chunks show slightly better performance with query prefix
 
 **Limitations:**
-1. **Small question set:** The final question set has only 39 questions (49 generated, 10 removed by a title-words filter and the 002 changes). With only 9 papers and 3-6 questions each, statistical significance is limited.
+1. **Small question set:** The final question set has only 39 questions (49 generated, 10 removed by filtering). With only 9 papers and 3-6 questions each, statistical significance is limited.
 2. **Thin coverage:** ML field and some styles (conceptual) have fewer questions, making comparisons less reliable.
 3. **Question sensitivity:** One question is about 2.6 percentage points (1/39 ≈ 2.56%), so differences of one to three questions (256 vs 384, prefix vs none) are not statistically significant.
 4. **No lenient/paper-level metrics:** Only strict hit metrics were computed; lenient and paper-level Hit@k were not included in the evaluation outputs.
 5. **Entities unused:** Entities were extracted but not used in retrieval, so their impact on performance is unknown.
 6. **No model comparison:** Only one embedding model was evaluated due to API limits.
+
+## 11. Problems and Fixes Timeline
+
+| Date | Problem | Fix |
+|------|---------|-----|
+| 2026-11-22 | Hand-written stopwords in lab_entities.py | Replaced with NLTK stopwords (sklearn fallback) |
+| 2026-11-22 | No document-frequency filtering | Added doc_freq_threshold=6 to drop terms appearing in >=6 papers |
+| 2026-11-22 | min_paper_freq changed to 1 | Restored to 2 (terms must appear in >=2 papers) |
+| 2026-11-22 | Doc-freq filter not applied to chunks | Modified Step 8 to filter common terms from chunk entities |
+| 2026-11-22 | ChromaDB corruption (disk full error) | Deleted and recreated data/chroma_lab, re-embedded chunks |
+| 2026-11-22 | Backup files deleted | Restored with git restore |
+
+## 12. Next Steps
+
+1. **Query classifier update:** Implement a classifier to determine whether a query requires factual retrieval, conceptual synthesis, or paraphrase matching. This could improve routing to appropriate retrieval strategies.
+
+2. **Answer cost optimization:** Evaluate the cost-effectiveness of different LLM models for answer generation. Consider using smaller models for simpler queries and larger models only for complex reasoning tasks.
+
+3. **Arabic extension idea:** Extend the pipeline to support Arabic documents and queries. This would require:
+   - Arabic-specific chunking and tokenization
+   - Arabic embedding models (e.g., AraBERT, MARBERT)
+   - Arabic stopwords for entity extraction
+   - RTL text handling in the UI
+
+## 13. Exact Reproduction Commands
+
+Run from repository root in Windows PowerShell with project environment:
+
+```powershell
+# Step 1: Install dependencies
+uv sync
+
+# Step 2: Chunk papers (both configs)
+uv run python scripts/lab_chunk.py --chunk-size 256 --chunk-overlap 26
+uv run python scripts/lab_chunk.py --chunk-size 384 --chunk-overlap 38
+
+# Step 3: Embed chunks (local model, ~2 minutes per config)
+uv run python scripts/lab_embed.py --model BAAI/bge-small-en-v1.5 --chunks data/lab/chunks_256_26.jsonl --mode vector --no-confirm
+uv run python scripts/lab_embed.py --model BAAI/bge-small-en-v1.5 --chunks data/lab/chunks_384_38.jsonl --mode vector --no-confirm
+
+# Step 4: Vector checks (both collections, ~30 seconds each)
+uv run python scripts/lab_check_vectors.py --collection retrieval_lab_BAAI_bge-small-en-v1.5_384_256_26_vector
+uv run python scripts/lab_check_vectors.py --collection retrieval_lab_BAAI_bge-small-en-v1.5_384_384_38_vector
+
+# Step 5: Entity extraction (both chunk files, ~1 minute per config)
+uv run python scripts/lab_entities.py --chunks data/lab/chunks_256_26.jsonl
+uv run python scripts/lab_entities.py --chunks data/lab/chunks_384_38.jsonl
+
+# Step 6: Question generation (requires OPENROUTER_API_KEY, ~15-30 minutes)
+# Skip this step if using existing questions in eval_lab/questions.jsonl
+# uv run python scripts/lab_qgen.py
+
+# Step 7: Evaluation (~1 minute)
+uv run python scripts/lab_eval.py
+```
+
+**Expected runtime:** ~10-15 minutes (excluding question generation)
+
+**File-by-file table:**
+
+| Path | Role |
+|------|------|
+| scripts/lab_chunk.py | Builds paper manifest and overlapping chunks |
+| scripts/lab_embed.py | Embeds chunks and writes Chroma collections |
+| scripts/lab_check_vectors.py | Runs six vector-store sanity checks |
+| scripts/lab_qgen.py | Generates and validates synthetic questions |
+| scripts/lab_eval.py | Runs validation tests and retrieval evaluation |
+| scripts/lab_entities.py | Extracts and stores entity metadata |
+| scripts/lab_common.py | Shared lab configuration and collection naming |
+| scripts/compute_summary_by_group.py | Computes summary statistics by group (style/field) |
+| scripts/check_chunk_text_match.py | Debug helper: verifies ChromaDB text matches chunk files |
+| eval_lab/questions.jsonl | Checked-in evaluation questions |
+| eval_lab/results.json | Evaluation metrics per config |
+| eval_lab/sweep_summary.csv | Summary of evaluation sweep |
+| eval_lab/summary_by_group.csv | Per-style and per-field breakdown |
+| eval_lab/per_question.csv | Per-question retrieval ranks |
+| eval_lab/failures.csv | List of failed retrievals |
+| data/lab/chunks_256_26.jsonl | 256-token chunks with 26-token overlap |
+| data/lab/chunks_384_38.jsonl | 384-token chunks with 38-token overlap |
+| data/lab/paper_entities.json | Extracted entities per paper |
+| data/lab/shared_terms.csv | Term frequency across papers |
+| data/lab/entity_analysis.txt | Detailed entity analysis (20 random chunks, top terms, junk) |
+| data/chroma_lab/ | ChromaDB vector store (local) |

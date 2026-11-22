@@ -23,6 +23,28 @@ from lab_common import (
     print_error
 )
 
+# Download NLTK stopwords if needed
+try:
+    import nltk
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        print_warning("NLTK stopwords not found. Downloading...")
+        nltk.download('stopwords', quiet=True)
+    from nltk.corpus import stopwords
+    STOPWORDS = set(stopwords.words('english'))
+    print(f"Using NLTK stopwords ({len(STOPWORDS)} words)")
+except ImportError:
+    # Fallback to sklearn if NLTK not available
+    try:
+        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+        STOPWORDS = set(ENGLISH_STOP_WORDS)
+        print_warning(f"NLTK not available. Using sklearn ENGLISH_STOP_WORDS as fallback ({len(STOPWORDS)} words)")
+    except ImportError:
+        # Last resort: empty set (YAKE has built-in stopword handling)
+        print_warning("Neither NLTK nor sklearn available. Using YAKE's built-in stopword handling only.")
+        STOPWORDS = set()
+
 
 def verify_all_models():
     """Import and run model verification."""
@@ -37,25 +59,6 @@ def verify_all_models():
                 sys.exit(e.code)
     finally:
         sys.argv = old_argv
-
-
-# Stopwords for filtering
-STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
-    "by", "from", "as", "is", "was", "are", "were", "be", "been", "being", "have", "has",
-    "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "must",
-    "shall", "can", "need", "dare", "ought", "used", "it", "its", "this", "that", "these",
-    "those", "i", "you", "he", "she", "we", "they", "what", "which", "who", "whom", "whose",
-    "where", "when", "why", "how", "all", "each", "every", "both", "few", "more", "most",
-    "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too",
-    "very", "just", "also", "now", "here", "there", "then", "once", "about", "into", "through",
-    "during", "before", "after", "above", "below", "between", "under", "again", "further",
-    "while", "until", "although", "though", "because", "since", "unless", "whether", "while",
-    # Generic academic words to drop
-    "results", "number", "data", "pages", "model", "network", "method", "approach", "paper",
-    "figure", "table", "proposed", "study", "analysis", "based", "using", "show", "present",
-    "provide", "consider", "however", "therefore", "thus", "hence", "within", "without"
-}
 
 
 def normalize_term(term: str) -> str:
@@ -282,7 +285,10 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
                 filtered.append(norm)
         chunk_filtered_entities.append(filtered)
     
-    print(f"  After validity filter: {sum(len(e) for e in chunk_filtered_entities)} candidates")
+    raw_count = sum(len(e) for e in chunk_raw_entities)
+    filtered_count = sum(len(e) for e in chunk_filtered_entities)
+    print(f"  After validity filter (stopwords, length, etc.): {filtered_count} candidates")
+    print(f"    Removed by validity filter: {raw_count - filtered_count} ({(raw_count - filtered_count)/raw_count*100:.1f}%)")
     
     # Step 3: Compute TF-IDF scores
     print("\nStep 3: Computing TF-IDF scores...")
@@ -324,31 +330,69 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
         for term in entities[:config.max_entities_per_chunk]:
             paper_entities[chunk["paper_id"]][term] += 1
     
-    # Step 5: Find terms in >50% of papers and drop them
-    print("\nStep 5: Filtering overly common terms (>50% of papers)...")
+    # Step 5: Compute document frequency from ALL filtered entities (full cleaned text of each paper)
+    print(f"\nStep 5: Computing document frequency from full cleaned text of each paper...")
     n_papers = len(paper_entities)
-    term_paper_count = defaultdict(set)
-    for paper_id, counter in paper_entities.items():
-        for term in counter:
-            term_paper_count[term].add(paper_id)
+    term_paper_count_full = defaultdict(set)
+    for chunk, entities in zip(chunks, chunk_filtered_entities):
+        for term in entities:
+            term_paper_count_full[term].add(chunk["paper_id"])
     
-    common_terms = {term for term, papers in term_paper_count.items() 
-                    if len(papers) > 0.5 * n_papers}
-    print(f"  Dropping {len(common_terms)} terms appearing in >50% of papers")
+    # Print distribution of term occurrence across papers
+    freq_dist = Counter()
+    for term, papers in term_paper_count_full.items():
+        freq_dist[len(papers)] += 1
+    print(f"  Distribution of distinct candidate terms across papers:")
+    for n_papers_occurrence in sorted(freq_dist.keys()):
+        print(f"    {n_papers_occurrence} papers: {freq_dist[n_papers_occurrence]} terms")
+    
+    # Print 20 most widespread terms
+    most_widespread = sorted(term_paper_count_full.items(), key=lambda x: len(x[1]), reverse=True)[:20]
+    print(f"\n  20 most widespread terms:")
+    for term, papers in most_widespread:
+        print(f"    {term}: {len(papers)} papers")
+    
+    # Test different thresholds
+    for threshold in [4, 5, 6]:
+        common_terms = {term for term, papers in term_paper_count_full.items() if len(papers) >= threshold}
+        print(f"  Threshold {threshold}: would drop {len(common_terms)} terms")
+        if threshold == 6 and len(common_terms) > 0:
+            print(f"    Terms dropped: {list(common_terms)[:20]}")
+    
+    # Step 6: Filter overly common terms (data-driven filter)
+    print(f"\nStep 6: Filtering overly common terms (appearing in >= {config.doc_freq_threshold} papers)...")
+    common_terms = {term for term, papers in term_paper_count_full.items() 
+                    if len(papers) >= config.doc_freq_threshold}
+    print(f"  Dropping {len(common_terms)} terms appearing in >= {config.doc_freq_threshold} of {n_papers} papers")
     if len(common_terms) > 0:
         print(f"  Sample: {list(common_terms)[:10]}")
     
-    # Step 6: Apply min_paper_freq filter at paper level only (for paper_entities.json)
+    # Count how many entities would be removed by doc-freq filter
+    entities_before_doc_freq = sum(len(chunk_ranked_entities[i][:config.max_entities_per_chunk]) for i in range(len(chunks)))
+    print(f"  Entities before doc-freq filter: {entities_before_doc_freq}")
+    
+    # Track most commonly dropped terms (by document frequency)
+    dropped_terms_sorted = sorted(
+        [(term, len(term_paper_count_full[term])) for term in common_terms],
+        key=lambda x: x[1],
+        reverse=True
+    )
+    
+    # Step 7: Apply min_paper_freq filter at paper level only (for paper_entities.json)
     # Adaptive threshold: for small corpora, use lower threshold
     adaptive_min_freq = min(config.min_paper_freq, max(1, n_papers // 3))
-    print(f"\nStep 6: Applying min_paper_freq filter for paper-level entities (adaptive: {adaptive_min_freq}, papers: {n_papers})...")
+    print(f"\nStep 7: Applying min_paper_freq filter for paper-level entities (adaptive: {adaptive_min_freq}, papers: {n_papers})...")
+    
+    # Count entities before min_paper_freq filter
+    entities_before_min_freq = sum(len(counter) for counter in paper_entities.values())
+    
     paper_entities_filtered = {}
     for paper_id, counter in paper_entities.items():
         # First drop common terms
         filtered_counter = Counter({k: v for k, v in counter.items() if k not in common_terms})
         # Then apply adaptive min_paper_freq (across papers)
         filtered_counter = Counter({k: v for k, v in filtered_counter.items() 
-                                     if len(term_paper_count[k]) >= adaptive_min_freq})
+                                     if len(term_paper_count_full[k]) >= adaptive_min_freq})
         # Limit to max_entities_per_paper
         filtered = filtered_counter.most_common(config.max_entities_per_paper)
         paper_entities_filtered[paper_id] = [
@@ -356,23 +400,49 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
             for term, freq in filtered
         ]
     
-    # For chunks: use top TF-IDF terms directly (no shared term filter)
-    # This ensures each chunk has its most relevant terms
-    print("\nStep 7: Updating chunks with top TF-IDF entities (no shared term filter)...")
+    entities_after_min_freq = sum(len(entities) for entities in paper_entities_filtered.values())
+    print(f"  Paper-level entities before min_paper_freq: {entities_before_min_freq}")
+    print(f"  Paper-level entities after min_paper_freq: {entities_after_min_freq}")
+    print(f"    Removed by min_paper_freq filter: {entities_before_min_freq - entities_after_min_freq} ({(entities_before_min_freq - entities_after_min_freq)/entities_before_min_freq*100:.1f}%)")
+    
+    # For chunks: use top TF-IDF terms, but filter out common terms by document frequency
+    print("\nStep 8: Updating chunks with top TF-IDF entities (with document-frequency filter)...")
     for i, chunk in enumerate(chunks):
         ranked = chunk_ranked_entities[i]
-        # Take top entities directly from TF-IDF ranking
-        chunk["entities"] = ranked[:config.max_entities_per_chunk]
+        # Filter out common terms by document frequency
+        filtered_ranked = [t for t in ranked if t not in common_terms]
+        # Take top entities from filtered list
+        chunk["entities"] = filtered_ranked[:config.max_entities_per_chunk]
+    
+    entities_after_doc_freq = sum(len(c["entities"]) for c in chunks)
+    print(f"  Entities after doc-freq filter: {entities_after_doc_freq}")
+    print(f"    Removed by doc-freq filter: {entities_before_doc_freq - entities_after_doc_freq} ({(entities_before_doc_freq - entities_after_doc_freq)/entities_before_doc_freq*100:.1f}%)")
     
     # Stats
     entity_counts = [len(c["entities"]) for c in chunks]
     chunks_with_zero = sum(1 for c in entity_counts if c == 0)
+    chunks_with_fewer_than_8 = sum(1 for c in entity_counts if c < 8)
     
     print(f"\nEntity statistics:")
     print(f"  Mean entities per chunk: {sum(entity_counts)/len(entity_counts):.2f}")
     print(f"  Median entities per chunk: {sorted(entity_counts)[len(entity_counts)//2]:.0f}")
     print(f"  Chunks with 0 entities: {chunks_with_zero}/{len(chunks)} ({100*chunks_with_zero/len(chunks):.1f}%)")
+    print(f"  Chunks with fewer than 8 entities: {chunks_with_fewer_than_8}/{len(chunks)} ({100*chunks_with_fewer_than_8/len(chunks):.1f}%)")
     print(f"  Max entities per chunk: {max(entity_counts)}")
+    
+    # Print 10 random terms removed by min_paper_freq=2 but kept by 1
+    print(f"\n10 random terms removed by min_paper_freq=2 but kept by 1:")
+    terms_removed_by_2 = []
+    for paper_id, counter in paper_entities.items():
+        for term, freq in counter.items():
+            if len(term_paper_count_full[term]) == 1 and freq >= 1:
+                terms_removed_by_2.append(term)
+    if len(terms_removed_by_2) > 0:
+        sample_terms = random.sample(terms_removed_by_2, min(10, len(terms_removed_by_2)))
+        for term in sample_terms:
+            print(f"  {term}")
+    else:
+        print(f"  No such terms found")
     
     # Save updated chunks
     with open(chunks_path, "w", encoding="utf-8") as f:
@@ -386,7 +456,7 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
     
     # Save shared terms (from all chunks, not just filtered paper entities)
     shared_terms = []
-    for term, papers in term_paper_count.items():
+    for term, papers in term_paper_count_full.items():
         shared_terms.append({
             "term": term,
             "n_papers": len(papers),
@@ -405,6 +475,11 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
     for st in shared_terms[:30]:
         print(f"  {st['term']}: {st['n_papers']} papers")
     
+    # Top 10 dropped terms by document frequency
+    print(f"\nTop 10 terms dropped by document-frequency filter (>= {config.doc_freq_threshold} papers):")
+    for term, n_papers in dropped_terms_sorted[:10]:
+        print(f"  {term}: {n_papers} papers")
+    
     # Per-paper top terms
     print("\nTop 15 terms per paper:")
     for paper_id, entities in list(paper_entities_filtered.items())[:3]:
@@ -417,8 +492,61 @@ def extract_entities_from_chunks(chunks_file: str, config) -> List[Dict]:
     sample = random.sample(chunks, min(20, len(chunks)))
     for chunk in sample:
         print(f"  [{chunk['chunk_id']}]")
-        print(f"    Text: {chunk['text'][:100]}...")
+        text_snippet = chunk['text'][:100].encode('ascii', 'ignore').decode('ascii')
+        print(f"    Text: {text_snippet}...")
         print(f"    Terms: {chunk['entities'][:5]}")
+    
+    # Write detailed output to file for analysis
+    output_path = Path(config.data_dir) / "entity_analysis.txt"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("20 random chunks with entities:\n")
+        f.write("=" * 80 + "\n\n")
+        for chunk in sample:
+            f.write(f"[{chunk['chunk_id']}]\n")
+            f.write(f"Text: {chunk['text'][:200]}...\n")
+            f.write(f"Terms: {chunk['entities']}\n\n")
+        
+        f.write("\nTop 10 terms per paper:\n")
+        f.write("=" * 80 + "\n\n")
+        for paper_id, entities in paper_entities_filtered.items():
+            f.write(f"{paper_id}:\n")
+            for ent in entities[:10]:
+                f.write(f"  {ent['term']} (freq={ent['freq']})\n")
+            f.write("\n")
+        
+        # Analyze junk in entities
+        f.write("\nJunk analysis:\n")
+        f.write("=" * 80 + "\n\n")
+        all_entities = []
+        for chunk in chunks:
+            all_entities.extend(chunk['entities'])
+        
+        import re
+        entities_with_digits = [e for e in all_entities if re.search(r'\d', e)]
+        entities_with_urls = [e for e in all_entities if re.search(r'http|www|\.com|\.org|\.edu', e, re.IGNORECASE)]
+        entities_single_char = [e for e in all_entities if len(e.strip()) == 1]
+        entities_with_et_al = [e for e in all_entities if 'et al' in e.lower()]
+        entities_with_fig = [e for e in all_entities if re.search(r'\bfig\b', e, re.IGNORECASE)]
+        
+        f.write(f"Total entities: {len(all_entities)}\n")
+        f.write(f"Entities containing digits: {len(entities_with_digits)} ({len(entities_with_digits)/len(all_entities)*100:.1f}%)\n")
+        f.write(f"Entities with URLs: {len(entities_with_urls)} ({len(entities_with_urls)/len(all_entities)*100:.1f}%)\n")
+        f.write(f"Single character entities: {len(entities_single_char)} ({len(entities_single_char)/len(all_entities)*100:.1f}%)\n")
+        f.write(f"Entities with 'et al': {len(entities_with_et_al)} ({len(entities_with_et_al)/len(all_entities)*100:.1f}%)\n")
+        f.write(f"Entities with 'fig': {len(entities_with_fig)} ({len(entities_with_fig)/len(all_entities)*100:.1f}%)\n")
+        
+        if entities_with_digits:
+            f.write(f"\nSample entities with digits (10): {entities_with_digits[:10]}\n")
+        if entities_with_urls:
+            f.write(f"\nSample entities with URLs: {entities_with_urls}\n")
+        if entities_single_char:
+            f.write(f"\nSingle character entities: {entities_single_char}\n")
+        if entities_with_et_al:
+            f.write(f"\nSample entities with 'et al' (10): {entities_with_et_al[:10]}\n")
+        if entities_with_fig:
+            f.write(f"\nSample entities with 'fig' (10): {entities_with_fig[:10]}\n")
+    
+    print(f"\nDetailed analysis written to: {output_path}")
     
     return chunks
 

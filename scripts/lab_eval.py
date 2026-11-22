@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Set
 import numpy as np
 from datetime import datetime
+from math import sqrt
 
 import chromadb
 from chromadb.config import Settings
@@ -121,12 +122,23 @@ def paper_level_hit(retrieved_chunks: List[Dict], gold_paper_id: str) -> bool:
 
 
 def compute_metrics(results: List[Dict], top_k: List[int]) -> Dict:
-    """Compute retrieval metrics."""
+    """Compute retrieval metrics (strict, lenient, paper-level)."""
     metrics = {}
     
+    # Strict hit@k
     for k in top_k:
         hit_count = sum(1 for r in results if r['rank'] <= k)
         metrics[f'hit@{k}'] = hit_count / len(results)
+    
+    # Lenient hit@k
+    for k in top_k:
+        hit_count = sum(1 for r in results if r.get('lenient_rank', 999) <= k)
+        metrics[f'lenient_hit@{k}'] = hit_count / len(results)
+    
+    # Paper-level hit@k
+    for k in top_k:
+        hit_count = sum(1 for r in results if r.get('paper_rank', 999) <= k)
+        metrics[f'paper_hit@{k}'] = hit_count / len(results)
     
     # Recall@k
     for k in top_k:
@@ -143,6 +155,18 @@ def compute_metrics(results: List[Dict], top_k: List[int]) -> Dict:
         if r['rank'] <= 10:
             ndcg += 1.0 / np.log2(r['rank'] + 1)
     metrics['ndcg@10'] = ndcg / len(results)
+    
+    # Wilson confidence intervals for Hit@1 and Hit@10
+    n = len(results)
+    z = 1.96  # 95% confidence
+    
+    for k in [1, 10]:
+        p = metrics[f'hit@{k}']
+        denominator = 1 + z**2 / n
+        center = (p + z**2 / (2 * n)) / denominator
+        margin = z * sqrt((p * (1 - p) + z**2 / (4 * n)) / n) / denominator
+        metrics[f'hit@{k}_ci_lower'] = max(0, center - margin)
+        metrics[f'hit@{k}_ci_upper'] = min(1, center + margin)
     
     return metrics
 
@@ -484,6 +508,9 @@ def main():
                 
                 # Find gold rank using hit rule (strict or lenient)
                 gold_rank = None
+                lenient_rank = None
+                paper_rank = None
+                
                 for i, chunk_id in enumerate(retrieved['ids'][0]):
                     if chunk_id in chunks:
                         retrieved_chunk = chunks[chunk_id]
@@ -492,11 +519,20 @@ def main():
                         if chunk_size == 256:
                             if chunk_id == question['chunk_id']:
                                 gold_rank = i + 1
-                                break
+                            if lenient_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
+                                if lenient_rank is None:
+                                    lenient_rank = i + 1
                         else:  # 384 config
                             if strict_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
-                                gold_rank = i + 1
-                                break
+                                if gold_rank is None:
+                                    gold_rank = i + 1
+                            if lenient_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
+                                if lenient_rank is None:
+                                    lenient_rank = i + 1
+                        
+                        # Paper-level hit
+                        if paper_rank is None and retrieved_chunk['paper_id'] == question['paper_id']:
+                            paper_rank = i + 1
                 
                 if gold_rank is None or gold_rank > 10:
                     failures.append({
@@ -513,6 +549,8 @@ def main():
                     'field': question['paper_id'].split('_')[1],
                     'style': question['style'],
                     'rank': gold_rank if gold_rank else 999,
+                    'lenient_rank': lenient_rank if lenient_rank else 999,
+                    'paper_rank': paper_rank if paper_rank else 999,
                     'config': config_key
                 })
             
@@ -539,6 +577,7 @@ def main():
         if not chunks:
             continue
         
+        config_key = f"BM25_{chunk_size}"
         print(f"\nBM25 {chunk_size}:")
         bm25_results = run_bm25_retrieval(questions, chunks)
         bm25_eval = []
@@ -552,21 +591,36 @@ def main():
             
             # Find gold rank using strict hit rule
             gold_rank = None
+            lenient_rank = None
+            paper_rank = None
+            
             for i, chunk_id in enumerate(retrieved['ids']):
                 if chunk_id in chunks:
                     retrieved_chunk = chunks[chunk_id]
                     if strict_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
-                        gold_rank = i + 1
-                        break
+                        if gold_rank is None:
+                            gold_rank = i + 1
+                    if lenient_hit(retrieved_chunk, question['paper_id'], gold_text, gold_start, gold_end):
+                        if lenient_rank is None:
+                            lenient_rank = i + 1
+                    if paper_rank is None and retrieved_chunk['paper_id'] == question['paper_id']:
+                        paper_rank = i + 1
             
             bm25_eval.append({
+                'question': question['question'],
+                'paper_id': question['paper_id'],
                 'rank': gold_rank if gold_rank else 999,
+                'lenient_rank': lenient_rank if lenient_rank else 999,
+                'paper_rank': paper_rank if paper_rank else 999,
                 'field': question['paper_id'].split('_')[1],
-                'style': question['style']
+                'style': question['style'],
+                'config': config_key
             })
         
+        all_eval_results.extend(bm25_eval)
+        
         bm25_metrics = compute_metrics(bm25_eval, TOP_K)
-        all_results[f"BM25_{chunk_size}"] = bm25_metrics
+        all_results[config_key] = bm25_metrics
         print("  Hit@1:", round(bm25_metrics['hit@1'], 3))
         print("  Hit@3:", round(bm25_metrics['hit@3'], 3))
         print("  Hit@5:", round(bm25_metrics['hit@5'], 3))
@@ -575,10 +629,8 @@ def main():
         print("  MRR:", round(bm25_metrics['mrr'], 3))
         print("  nDCG@10:", round(bm25_metrics['ndcg@10'], 3))
     
-    # Print grouped metrics (skip BM25 configs here)
+    # Print grouped metrics (include BM25 configs)
     for config_key in all_results.keys():
-        if config_key.startswith('BM25'):
-            continue
         config_eval = [r for r in all_eval_results if r.get('config') == config_key]
         
         print("\n--- " + config_key + " by Style (strict) ---")
@@ -611,13 +663,14 @@ def main():
     # Save per_question.csv
     with open(eval_dir / "per_question.csv", 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['question', 'paper_id', 'style', 'rank'])
+        writer.writerow(['question', 'paper_id', 'style', 'rank', 'config'])
         for result in all_eval_results:
             writer.writerow([
                 result['question'],
                 result['paper_id'],
                 result['style'],
-                result['rank']
+                result['rank'],
+                result['config']
             ])
     
     # Save failures.csv
@@ -637,7 +690,7 @@ def main():
     # Save sweep_summary.csv
     with open(eval_dir / "sweep_summary.csv", 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['config', 'hit@1', 'hit@3', 'hit@5', 'hit@10', 'recall@10', 'mrr', 'ndcg@10'])
+        writer.writerow(['config', 'hit@1', 'hit@3', 'hit@5', 'hit@10', 'lenient_hit@1', 'lenient_hit@3', 'lenient_hit@5', 'lenient_hit@10', 'paper_hit@1', 'paper_hit@3', 'paper_hit@5', 'paper_hit@10', 'recall@10', 'mrr', 'ndcg@10'])
         for config_key, metrics in all_results.items():
             writer.writerow([
                 config_key,
@@ -645,6 +698,14 @@ def main():
                 round(metrics.get('hit@3', 0), 4),
                 round(metrics.get('hit@5', 0), 4),
                 round(metrics['hit@10'], 4),
+                round(metrics.get('lenient_hit@1', 0), 4),
+                round(metrics.get('lenient_hit@3', 0), 4),
+                round(metrics.get('lenient_hit@5', 0), 4),
+                round(metrics.get('lenient_hit@10', 0), 4),
+                round(metrics.get('paper_hit@1', 0), 4),
+                round(metrics.get('paper_hit@3', 0), 4),
+                round(metrics.get('paper_hit@5', 0), 4),
+                round(metrics.get('paper_hit@10', 0), 4),
                 round(metrics.get('recall@10', 0), 4),
                 round(metrics['mrr'], 4),
                 round(metrics.get('ndcg@10', 0), 4)

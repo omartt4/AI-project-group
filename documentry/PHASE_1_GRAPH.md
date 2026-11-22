@@ -11,11 +11,9 @@ checks, or evaluation.
 
 - Branch: `phase_1_graph`
 - Upstream: `origin/phase_1_graph`
-- Latest checked-in commit: `0323c35` (`Update lab evaluation and embedding scripts`)
-- The working tree currently contains an uncommitted change in
-  `scripts/lab_eval.py`.
 - PDFs, `data/`, and `.env` are intentionally ignored and must not be
   committed.
+- Current state: Entity extraction refined with NLTK stopwords and document-frequency filtering (doc_freq_threshold=6, min_paper_freq=2).
 
 ## Retrieval-lab scope
 
@@ -38,8 +36,10 @@ The current experiment design uses:
 - Query variants: no prefix and
   `Represent this sentence for searching relevant passages: `.
 - BM25 as a lexical validity baseline.
-- YAKE and NLTK stopwords for stored per-chunk/per-paper entities. Entities
-  are not used for retrieval or evaluation.
+- YAKE with NLTK stopwords (sklearn fallback) for stored per-chunk/per-paper entities.
+  Entity filtering: min_paper_freq=2 (terms must appear in >= 2 papers for paper_entities.json),
+  doc_freq_threshold=6 (terms appearing in >= 6 of 9 papers are dropped from chunks).
+  Entities are not used for retrieval or evaluation.
 - Synthetic questions only; no manually authored questions.
 
 ## Important files

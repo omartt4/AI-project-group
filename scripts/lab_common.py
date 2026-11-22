@@ -64,6 +64,7 @@ class LabConfig:
     max_entities_per_chunk: int = field(default_factory=lambda: int(os.getenv("LAB_MAX_ENTITIES_PER_CHUNK", "8")))
     max_entities_per_paper: int = 50
     min_paper_freq: int = 2  # Terms appearing in fewer papers are dropped
+    doc_freq_threshold: int = field(default_factory=lambda: int(os.getenv("LAB_DOC_FREQ_THRESHOLD", "6")))  # Drop terms appearing in >= N papers (data-driven filter)
     ngram_max: int = 3  # Max n-gram size for YAKE
     entity_boost: float = field(default_factory=lambda: float(os.getenv("LAB_ENTITY_BOOST", "0.15")))
     

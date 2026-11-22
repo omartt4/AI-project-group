@@ -1,0 +1,115 @@
+Failure Classification:
+================================================================================
+
+Question: What is the first step in the proposed method to obtain initial diarization results?
+  Paper: 001_NLP_End-to-End_Speaker_Diarization_as_Post-Processing
+  Style: factual
+  Classification: right_paper_wrong_chunk
+  Failures: 4
+
+Question: How does the feature extraction network output a tensor of size a*b*M for each layer, and what do a*b and M represent?
+  Paper: 041_Computer_Vision_Appearance-Invariant_6-DoF_Visual_Localization_using_Generative_Adversarial_Networks
+  Style: conceptual
+  Classification: right_paper_wrong_chunk
+  Failures: 4
+
+Question: What fixed learning rate and batch size were used to train the localization network, and what maximum iteration was set for convergence?
+  Paper: 041_Computer_Vision_Appearance-Invariant_6-DoF_Visual_Localization_using_Generative_Adversarial_Networks
+  Style: conceptual
+  Classification: wrong_paper
+  Failures: 1
+
+
+15 Vaguest Questions:
+================================================================================
+
+1. Question: What is the first step in the proposed method to obtain initial diarization results?
+   Avg Rank: 666.67
+   Min Rank: 2
+   Max Rank: 999
+   Configs: 6
+
+2. Question: How does the feature extraction network output a tensor of size a*b*M for each layer, and what do a*b and M represent?
+   Avg Rank: 666.50
+   Min Rank: 1
+   Max Rank: 999
+   Configs: 6
+
+3. Question: What fixed learning rate and batch size were used to train the localization network, and what maximum iteration was set for convergence?
+   Avg Rank: 168.67
+   Min Rank: 1
+   Max Rank: 999
+   Configs: 6
+
+4. Question: What two metrics are used to evaluate the inclusion/exclusion phrase mining task and how do they differ in measuring correctness?
+   Avg Rank: 4.17
+   Min Rank: 1
+   Max Rank: 8
+   Configs: 6
+
+5. Question: What is the CVPPP dataset and why is it considered a benchmark for leaf segmentation and counting tasks?
+   Avg Rank: 4.17
+   Min Rank: 2
+   Max Rank: 8
+   Configs: 6
+
+6. Question: What model architecture and configuration achieved the best results when using test-time augmentation for leaf segmentation and counting tasks?
+   Avg Rank: 4.00
+   Min Rank: 2
+   Max Rank: 5
+   Configs: 6
+
+7. Question: What is the name of the framework introduced in the paper that unifies homophily and heterophily using motif representations and micro-level and macro-level walk paths?
+   Avg Rank: 3.83
+   Min Rank: 2
+   Max Rank: 7
+   Configs: 6
+
+8. Question: How is the relation representation formed as a query vector in the RA-CapNet model?
+   Avg Rank: 3.67
+   Min Rank: 1
+   Max Rank: 7
+   Configs: 6
+
+9. Question: What are the nine categories of constraints related to tourist spots mentioned in the text?
+   Avg Rank: 3.50
+   Min Rank: 1
+   Max Rank: 9
+   Configs: 6
+
+10. Question: What are the three propositions made in the paper regarding medical coding from multiple data sources?
+   Avg Rank: 3.17
+   Min Rank: 1
+   Max Rank: 7
+   Configs: 6
+
+11. Question: How does ContFuse fuse multi-scale convolutional feature maps, and what limitation does it face when LiDAR points are very sparse?
+   Avg Rank: 3.00
+   Min Rank: 1
+   Max Rank: 6
+   Configs: 6
+
+12. Question: Which academic references are cited in the text related to named entity recognition and travel itinerary construction?
+   Avg Rank: 2.17
+   Min Rank: 1
+   Max Rank: 4
+   Configs: 6
+
+13. Question: What two complementary components does the H2NT framework use to represent homophily and heterophily through micro-level and macro-level walk paths?
+   Avg Rank: 2.17
+   Min Rank: 1
+   Max Rank: 6
+   Configs: 6
+
+14. Question: What assumption underlies clustering-based diarization methods regarding speaker presence per frame?
+   Avg Rank: 2.00
+   Min Rank: 1
+   Max Rank: 4
+   Configs: 6
+
+15. Question: What is the primary challenge addressed by distant supervised relation extraction in knowledge base construction?
+   Avg Rank: 2.00
+   Min Rank: 1
+   Max Rank: 3
+   Configs: 6
+

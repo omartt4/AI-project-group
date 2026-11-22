@@ -6,7 +6,7 @@ from collections import defaultdict
 
 def compute_metrics_by_group(csv_file):
     """Compute metrics grouped by style and field for each config."""
-    configs = ['256_none', '256_instruction', '384_none', '384_instruction']
+    configs = ['256_none', '256_instruction', '384_none', '384_instruction', 'BM25_256', 'BM25_384']
     groups = ['style', 'field']
     
     # Read per_question.csv
@@ -14,16 +14,20 @@ def compute_metrics_by_group(csv_file):
         reader = csv.DictReader(f)
         rows = list(reader)
     
-    # Split by config (each question appears 4 times, once per config)
+    # Split by config (each question appears 6 times now)
     config_rows = {config: [] for config in configs}
-    for i, row in enumerate(rows):
-        config = configs[i % 4]
-        config_rows[config].append(row)
+    for row in rows:
+        config = row.get('config')
+        if config in config_rows:
+            config_rows[config].append(row)
     
     # Compute metrics for each config and group
     results = []
     for config in configs:
         rows_config = config_rows[config]
+        
+        if not rows_config:
+            continue
         
         for group in groups:
             grouped = defaultdict(list)
@@ -77,5 +81,3 @@ if __name__ == "__main__":
         writer.writerows(results)
     
     print(f"Saved {len(results)} rows to eval_lab/summary_by_group.csv")
-    print("\nNote: BM25_256 and BM25_384 are not included in per_question.csv")
-    print("Note: lenient and paper-level metrics are not computed from existing outputs")
