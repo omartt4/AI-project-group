@@ -13,11 +13,7 @@ from typing import Any, Dict, List, Optional
 from graph_rag.config import settings
 from graph_rag.database.db import get_db_connection
 from graph_rag.evaluation.latency_tracker import LatencyMetrics, StageTimer
-from graph_rag.evaluation.metrics import (
-    evaluate_answer_relevance,
-    evaluate_context_relevance,
-    evaluate_faithfulness,
-)
+from graph_rag.evaluation.metrics import evaluate_all_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +47,10 @@ class EvaluationService:
         lat = latency or LatencyMetrics()
 
         with StageTimer() as eval_timer:
-            faith_score, faith_reason = evaluate_faithfulness(question, answer, context)
-            relevance_score, relevance_reason = evaluate_answer_relevance(question, answer)
-            ctx_score, ctx_reason = evaluate_context_relevance(question, context)
+            scores = evaluate_all_metrics(question, answer, context)
+            faith_score, faith_reason = scores["faithfulness"]
+            relevance_score, relevance_reason = scores["answer_relevance"]
+            ctx_score, ctx_reason = scores["context_relevance"]
 
         lat.eval_ms = eval_timer.elapsed_ms
         lat.total_ms = lat.retrieval_ms + lat.generation_ms + lat.eval_ms

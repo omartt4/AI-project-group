@@ -11,8 +11,11 @@ Orchestrates full document ingestion with two core modes:
 """
 
 import logging
+import hashlib
+import json
+import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -22,10 +25,12 @@ from graph_rag.database.db import get_db_connection
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.entity_extractor import (
     ExtractedEntity,
+    ExtractedMention,
     ExtractedRelation,
     GraphExtractionResult,
     entity_extractor,
 )
+from graph_rag.graph.entity_resolution import PaperEntityRegistry
 from graph_rag.graph.graph_builder import graph_builder
 from graph_rag.ingestion.archive_handler import archive_handler
 from graph_rag.ingestion.chunker import chunker
@@ -65,7 +70,9 @@ class IngestionPipeline:
         folder_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         limit: Optional[int] = None,
+        only_filename: Optional[str] = None,
         rebuild_graph: bool = False,
+        refresh_extraction: bool = False,
     ) -> List[IngestionResult]:
         """
         Run initial batch ingestion over pdfs/ folder.
@@ -73,6 +80,13 @@ class IngestionPipeline:
         """
         folder = folder_path or settings.PDF_DIR
         pdf_files = sorted(list(folder.glob("*.pdf")))
+        if only_filename:
+            requested = Path(only_filename).name.casefold()
+            pdf_files = [path for path in pdf_files if path.name.casefold() == requested]
+            if not pdf_files:
+                raise FileNotFoundError(
+                    f"PDF not found in {folder}: {Path(only_filename).name}"
+                )
         if limit and limit > 0:
             pdf_files = pdf_files[:limit]
         total_files = len(pdf_files)
@@ -95,7 +109,7 @@ class IngestionPipeline:
 
             # Check if already processed
             already_ingested = bool(rec.get("ingested_at") and rec.get("file_hash"))
-            if already_ingested and not rebuild_graph:
+            if already_ingested and not rebuild_graph and not refresh_extraction:
                 results.append(
                     IngestionResult(
                         filename=filename,
@@ -119,7 +133,11 @@ class IngestionPipeline:
 
                 # 2. Parse text
                 parsed_doc = file_handler.parse(pdf_file, filename=filename)
-                doc_title = rec.get("title") or parsed_doc.title
+                extracted_metadata = None
+                if not rec.get("title") or not rec.get("topic"):
+                    extracted_metadata = extract_paper_metadata(parsed_doc)
+                doc_title = rec.get("title") or (extracted_metadata or {}).get("title") or parsed_doc.title
+                topic = rec.get("topic") or (extracted_metadata or {}).get("topic") or "Unclassified"
                 if progress_callback:
                     progress_callback(idx, total_files, f"Parsed: {filename}")
 
@@ -128,29 +146,63 @@ class IngestionPipeline:
                 if progress_callback:
                     progress_callback(idx, total_files, f"Created {len(chunks)} chunks: {filename}")
 
-                # 4. Store in ChromaDB unless only rebuilding the graph.
-                if not rebuild_graph:
+                # 4. Extract once per paper (or load the versioned extraction cache).
+                graph_result = self._extract_paper_graph(
+                    chunks,
+                    doc_title,
+                    filename,
+                    file_hash=file_hash,
+                    refresh_extraction=refresh_extraction,
+                )
+
+                # 5. A graph rebuild normally reuses existing vectors. If a
+                # new/partially failed document has no vectors, repair them
+                # automatically instead of leaving it invisible to retrieval.
+                existing_vector_chunks = self.vector_db.get_document_chunk_count(filename)
+                if self._needs_vector_write(rebuild_graph, existing_vector_chunks):
                     self.vector_db.add_chunks(chunks)
                     if progress_callback:
                         progress_callback(idx, total_files, f"Embedded and stored {len(chunks)} chunks: {filename}")
+                elif progress_callback:
+                    progress_callback(
+                        idx,
+                        total_files,
+                        f"Reused {existing_vector_chunks} existing vector chunks: {filename}",
+                    )
 
-                # 5. Extract entities and populate Neo4j Graph
-                self.graph_db.add_document_node(
+                # 6. Populate Neo4j only after extraction succeeds, so a failed
+                # model request cannot leave a paper marked as completed.
+                if rebuild_graph:
+                    self.graph_db.clear_paper_evidence(filename)
+                if not self.graph_db.add_document_node(
                     document_name=filename,
                     title=doc_title,
                     metadata={
-                        "topic": rec.get("topic", "Research Paper"),
+                        "topic": topic,
                         "source": rec.get("source", "initial"),
                     },
-                )
-
-                graph_result = self._extract_paper_graph(chunks, doc_title)
-                self.graph_db.add_entities_and_relations(filename, graph_result)
+                ):
+                    raise RuntimeError("Neo4j paper write failed")
+                if not self.graph_db.add_entities_and_relations(filename, graph_result):
+                    raise RuntimeError("Neo4j entity write failed")
                 if progress_callback:
                     progress_callback(idx, total_files, f"Updated Neo4j graph: {filename}")
 
-                # 6. Update metadata.csv
-                self.meta_mgr.mark_as_ingested(local_pdf=filename, file_hash=file_hash)
+                # 7. Update metadata.csv. A fresh corpus may not have a row yet.
+                if rec:
+                    self.meta_mgr.mark_as_ingested(local_pdf=filename, file_hash=file_hash)
+                else:
+                    self.meta_mgr.append_document({
+                        "topic": topic,
+                        "title": doc_title,
+                        "authors": (extracted_metadata or {}).get("authors", ""),
+                        "abstract": (extracted_metadata or {}).get("abstract", ""),
+                        "categories": (extracted_metadata or {}).get("categories", topic),
+                        "local_pdf": filename,
+                        "source": "initial",
+                        "file_hash": file_hash,
+                        "ingested_at": datetime.now(timezone.utc).isoformat(),
+                    })
 
                 results.append(
                     IngestionResult(
@@ -172,8 +224,26 @@ class IngestionPipeline:
                         error_message=str(e),
                     )
                 )
+                error_text = str(e).casefold()
+                if any(
+                    marker in error_text
+                    for marker in (
+                        "403 forbidden",
+                        "402 payment required",
+                        "insufficient credits",
+                        "credit limit",
+                        "usage limit",
+                    )
+                ):
+                    logger.error("Stopping batch after a non-recoverable API billing or permission error")
+                    break
 
         return results
+
+    @staticmethod
+    def _needs_vector_write(rebuild_graph: bool, existing_chunk_count: int) -> bool:
+        """Write vectors for normal ingestion or repair a missing rebuild entry."""
+        return not rebuild_graph or existing_chunk_count == 0
 
     # ── Mode B: Dynamic User Upload Ingestion ──
     def ingest_uploaded_file(
@@ -248,22 +318,31 @@ class IngestionPipeline:
             # Step 4: Chunk Text
             chunks = chunker.chunk_document(parsed_doc)
 
-            # Step 5: Embed & Upsert into ChromaDB
-            self.vector_db.add_chunks(chunks)
-
-            # Step 6: Build Knowledge Graph in Neo4j
+            # Step 5: Extract the compact paper graph once and cache it.
             extracted_metadata = extract_paper_metadata(parsed_doc)
             doc_title = extracted_metadata["title"]
             topic = extracted_metadata["topic"]
-            self.graph_db.add_document_node(
+            graph_result = self._extract_paper_graph(
+                chunks,
+                doc_title,
+                filename,
+                file_hash=file_hash,
+            )
+
+            # Step 6: Embed & Upsert into ChromaDB.
+            self.vector_db.add_chunks(chunks)
+
+            # Step 7: Build Knowledge Graph in Neo4j.
+            if not self.graph_db.add_document_node(
                 document_name=filename,
                 title=doc_title,
                 metadata={"topic": topic, "source": "upload"},
-            )
-            graph_result = self._extract_paper_graph(chunks, doc_title)
-            self.graph_db.add_entities_and_relations(filename, graph_result)
+            ):
+                raise RuntimeError("Neo4j paper write failed")
+            if not self.graph_db.add_entities_and_relations(filename, graph_result):
+                raise RuntimeError("Neo4j entity write failed")
 
-            # Step 7: Append to metadata.csv
+            # Step 8: Append to metadata.csv
             new_meta_row = {
                 "topic": topic,
                 "title": doc_title,
@@ -277,7 +356,7 @@ class IngestionPipeline:
             }
             self.meta_mgr.append_document(new_meta_row)
 
-            # Step 8: Log success in SQLite
+            # Step 9: Log success in SQLite
             with get_db_connection() as conn:
                 conn.execute(
                     """
@@ -307,6 +386,10 @@ class IngestionPipeline:
 
         except Exception as e:
             logger.error(f"Failed to ingest uploaded file {filename}: {e}")
+            try:
+                self.vector_db.delete_document_chunks(filename)
+            except Exception:
+                pass
             # Clean up saved file if ingestion aborted
             if target_path.exists():
                 try:
@@ -344,37 +427,176 @@ class IngestionPipeline:
                 file_hash=file_hash,
             )
 
-    @staticmethod
-    def _extract_paper_graph(chunks: List[Any], document_title: str) -> GraphExtractionResult:
-        """Extract and merge graph data from every chunk in a paper."""
-        entities: Dict[tuple[str, str], ExtractedEntity] = {}
-        relations: Dict[tuple[str, str, str], ExtractedRelation] = {}
+    def _extract_paper_graph(
+        self,
+        chunks: List[Any],
+        document_title: str,
+        paper_id: str,
+        file_hash: str = "",
+        refresh_extraction: bool = False,
+    ) -> GraphExtractionResult:
+        """Extract one compact paper-level graph and cache the paid result."""
+        if not refresh_extraction:
+            cached = self._load_extraction_cache(paper_id, file_hash)
+            if cached is not None:
+                logger.info("Using cached graph extraction for %s", paper_id)
+                return cached
 
-        for chunk in chunks:
-            result = entity_extractor.extract(chunk.text, document_title=document_title)
-            for entity in result.entities:
-                key = (entity.name.strip().casefold(), entity.category.strip().casefold())
-                if key not in entities or len(entity.description) > len(entities[key].description):
-                    entities[key] = entity
-            for relation in result.relations:
-                key = (
-                    relation.source.strip().casefold(),
-                    relation.target.strip().casefold(),
-                    relation.relation_type.strip().upper(),
-                )
-                if key not in relations or len(relation.description) > len(relations[key].description):
-                    relations[key] = relation
+        source_text = self._select_graph_source(chunks)
+        if not source_text:
+            raise RuntimeError(f"No usable text found for graph extraction: {paper_id}")
 
-        entity_names = {entity.name.casefold() for entity in entities.values()}
-        merged_relations = [
-            relation
-            for relation in relations.values()
-            if relation.source.casefold() in entity_names and relation.target.casefold() in entity_names
-        ]
-        return GraphExtractionResult(
-            entities=list(entities.values()),
-            relations=merged_relations,
+        extraction_id = f"{paper_id}:paper-level"
+        result = entity_extractor.extract(
+            source_text,
+            document_title=document_title,
+            chunk_id=extraction_id,
+            known_entities=[],
         )
+        registry = PaperEntityRegistry(paper_id=paper_id)
+        mentions: Dict[str, ExtractedMention] = {}
+        relations: Dict[tuple[str, str, str, str], ExtractedRelation] = {}
+
+        for entity in result.entities:
+            if entity.category == "Person":
+                role = entity.attributes.get("role", "")
+                organization = entity.attributes.get("organization", "")
+                known = self.graph_db.find_person_by_role(role, organization)
+                if known:
+                    original_name = entity.name
+                    seeded = ExtractedEntity(
+                        name=known["name"],
+                        category="Person",
+                        description=known.get("description") or "",
+                        entity_id=known["entity_id"],
+                        aliases=sorted(set((known.get("aliases") or []) + [original_name])),
+                        attributes={
+                            "role": known.get("role") or role,
+                            "organization": known.get("organization") or organization,
+                        },
+                    )
+                    registry.seed(seeded)
+                    entity.entity_id = seeded.entity_id
+                    entity.name = seeded.name
+                    entity.aliases = seeded.aliases
+            registry.register(entity)
+
+        for mention in result.mentions:
+            mention.chunk_id = extraction_id
+            mention.entity_id = registry.resolve(
+                entity_id=mention.entity_id,
+                name=mention.entity_name,
+                category=mention.entity_category,
+            ) or ""
+            mention.mention_id = hashlib.sha256(
+                f"{extraction_id}|{mention.text}|{mention.entity_id}|{mention.evidence}".encode("utf-8")
+            ).hexdigest()[:24]
+            mentions[mention.mention_id] = mention
+
+        for relation in result.relations:
+            relation.chunk_id = extraction_id
+            relation.source_entity_id = registry.resolve(
+                entity_id=relation.source_entity_id,
+                name=relation.source,
+                category=relation.source_category,
+            ) or ""
+            relation.target_entity_id = registry.resolve(
+                entity_id=relation.target_entity_id,
+                name=relation.target,
+                category=relation.target_category,
+            ) or ""
+            key = (
+                relation.source_entity_id,
+                relation.target_entity_id,
+                relation.relation_type,
+                hashlib.sha256(relation.evidence.encode("utf-8")).hexdigest()[:16],
+            )
+            relations[key] = relation
+
+        resolved = GraphExtractionResult(
+            entities=list(registry.entities.values()),
+            mentions=list(mentions.values()),
+            relations=list(relations.values()),
+        )
+        self._save_extraction_cache(paper_id, file_hash, resolved)
+        return resolved
+
+    @staticmethod
+    def _select_graph_source(chunks: List[Any]) -> str:
+        """Choose high-value sections and cap paid extraction input per paper."""
+        useful: List[Any] = []
+        keywords = re.compile(
+            r"\b(?:abstract|keyword|method|methodology|approach|architecture|"
+            r"dataset|data set|experiment|evaluation|result|conclusion|propose)\b",
+            re.IGNORECASE,
+        )
+        for chunk in chunks:
+            text = chunk.text
+            references = re.search(
+                r"(?im)^\s*(?:\d+[.)]?\s*)?(?:references|bibliography)\s*$",
+                text,
+            )
+            if references:
+                text = text[:references.start()].strip()
+            if text and (chunk.chunk_index < 2 or keywords.search(text)):
+                useful.append((chunk, text))
+            if references:
+                break
+
+        parts: List[str] = []
+        remaining = settings.GRAPH_EXTRACTION_MAX_CHARS
+        for chunk, text in useful:
+            labelled = f"[Page {chunk.page_number}]\n{text.strip()}\n"
+            if remaining <= 0:
+                break
+            parts.append(labelled[:remaining])
+            remaining -= len(labelled)
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _cache_path(paper_id: str) -> Path:
+        key = hashlib.sha256(paper_id.encode("utf-8")).hexdigest()
+        return settings.EXTRACTION_CACHE_DIR / f"{key}.json"
+
+    def _load_extraction_cache(
+        self, paper_id: str, file_hash: str
+    ) -> Optional[GraphExtractionResult]:
+        path = self._cache_path(paper_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("extraction_version") != settings.EXTRACTION_VERSION:
+                return None
+            if file_hash and payload.get("file_hash") != file_hash:
+                return None
+            data = payload["result"]
+            return GraphExtractionResult(
+                entities=[ExtractedEntity(**row) for row in data.get("entities", [])],
+                mentions=[ExtractedMention(**row) for row in data.get("mentions", [])],
+                relations=[ExtractedRelation(**row) for row in data.get("relations", [])],
+            )
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            logger.warning("Ignoring invalid extraction cache for %s: %s", paper_id, exc)
+            return None
+
+    def _save_extraction_cache(
+        self,
+        paper_id: str,
+        file_hash: str,
+        result: GraphExtractionResult,
+    ) -> None:
+        path = self._cache_path(paper_id)
+        payload = {
+            "paper_id": paper_id,
+            "file_hash": file_hash,
+            "extraction_version": settings.EXTRACTION_VERSION,
+            "extraction_model": settings.EXTRACTION_MODEL,
+            "result": asdict(result),
+        }
+        temp_path = path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(path)
 
     # ── Mode B Helper: Archive Upload Handler ──
     def ingest_uploaded_archive(

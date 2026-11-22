@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from graph_rag.embeddings.vector_store import vector_store
-from graph_rag.llm.ollama_client import ollama_client
+from graph_rag.llm.model_client import embedding_model_client
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class DiversityRetriever:
 
     def __init__(self, v_store=None, client=None) -> None:
         self.vector_store = v_store or vector_store
-        self.llm_client = client or ollama_client
+        self.llm_client = client or embedding_model_client
 
     def retrieve_diverse(
         self,

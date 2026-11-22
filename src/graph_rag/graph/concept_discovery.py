@@ -148,14 +148,24 @@ class ConceptDiscoveryEngine:
         # Find matching entities and their 1-hop / 2-hop neighbors
         query = """
         MATCH (e:Entity)
-        WHERE toLower(e.name) CONTAINS toLower($kw)
-        OPTIONAL MATCH (e)-[r]-(neighbor:Entity)
+        WHERE e.dataset_id = $dataset_id
+          AND toLower(e.name) CONTAINS toLower($kw)
+        OPTIONAL MATCH (e)-[r]-(neighbor)
+        WHERE neighbor IS NULL OR (
+            neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
+        )
         RETURN e.name AS e_name, e.category AS e_cat, e.description AS e_desc,
-               type(r) AS rel, neighbor.name AS n_name, neighbor.category AS n_cat,
+               type(r) AS rel, coalesce(neighbor.name, neighbor.title) AS n_name,
+               CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS n_cat,
                neighbor.description AS n_desc
         LIMIT $limit
         """
-        records = session.run(query, kw=keyword, limit=limit)
+        records = session.run(
+            query,
+            kw=keyword,
+            limit=limit,
+            dataset_id=self.builder.dataset_id,
+        )
         for row in records:
             e_name = row["e_name"]
             if e_name:
@@ -202,17 +212,26 @@ class ConceptDiscoveryEngine:
 
         query = """
         MATCH (a:Entity)
-        WHERE toLower(a.name) CONTAINS toLower($target_a)
+        WHERE a.dataset_id = $dataset_id
+          AND toLower(a.name) CONTAINS toLower($target_a)
         MATCH (b:Entity)
-        WHERE toLower(b.name) CONTAINS toLower($target_b)
+        WHERE b.dataset_id = $dataset_id
+          AND toLower(b.name) CONTAINS toLower($target_b)
         MATCH (a)-[r1]-(bridge:Entity)-[r2]-(b)
+        WHERE bridge.dataset_id = $dataset_id
         RETURN DISTINCT bridge.name AS bridge_name, bridge.category AS bridge_cat,
                         bridge.description AS bridge_desc,
                         a.name AS a_name, type(r1) AS r1_type,
                         b.name AS b_name, type(r2) AS r2_type
         LIMIT $limit
         """
-        records = session.run(query, target_a=target_a, target_b=target_b, limit=limit)
+        records = session.run(
+            query,
+            target_a=target_a,
+            target_b=target_b,
+            limit=limit,
+            dataset_id=self.builder.dataset_id,
+        )
         for row in records:
             b_name = row["bridge_name"]
             if b_name:
@@ -247,7 +266,8 @@ class ConceptDiscoveryEngine:
         hubs: List[DiscoveredConcept] = []
         query = """
         MATCH (e:Entity)
-        WHERE any(kw in $keywords WHERE toLower(e.name) CONTAINS toLower(kw))
+        WHERE e.dataset_id = $dataset_id
+          AND any(kw in $keywords WHERE toLower(e.name) CONTAINS toLower(kw))
         OPTIONAL MATCH (e)-[r]-()
         WITH e, count(r) AS degree
         ORDER BY degree DESC
@@ -255,7 +275,12 @@ class ConceptDiscoveryEngine:
         LIMIT $limit
         """
         try:
-            records = session.run(query, keywords=keywords, limit=limit)
+            records = session.run(
+                query,
+                keywords=keywords,
+                limit=limit,
+                dataset_id=self.builder.dataset_id,
+            )
             for row in records:
                 if row["name"]:
                     hubs.append(

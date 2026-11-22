@@ -1,283 +1,85 @@
-# Graph Knowledge Building
+# Graph Knowledge Building — Schema v2
 
-The system builds a paper-wide knowledge graph during document ingestion.
+The redesigned ingestion pipeline builds an evidence-first graph for the
+current corpus. It does not reuse the old Neo4j graph or old embedding vectors.
 
-## 1. Paper parsing and chunking
+## Graph hierarchy
 
-Each paper is parsed into a `ParsedDocument`, then split into text chunks. Every
-chunk is processed for graph extraction. The chunks are also embedded into
-ChromaDB for vector retrieval.
-
-The paper-wide extraction is implemented in
-[`IngestionPipeline._extract_paper_graph`](src/graph_rag/ingestion/pipeline.py).
-
-## 2. LLM entity extraction
-
-Every chunk is sent to the local Ollama LLM with an extraction prompt. The LLM
-identifies scientific entities in the text.
-
-Allowed entity categories are:
-
-- `Topic`: research areas or subfields
-- `Method`: models, algorithms, architectures, or techniques
-- `Dataset`: benchmarks or datasets
-- `Author`: researchers mentioned in the text
-- `Finding`: important conclusions or insights
-
-Example response:
-
-```json
-{
-  "entities": [
-    {
-      "name": "BERT",
-      "category": "Method",
-      "description": "Transformer-based language model"
-    },
-    {
-      "name": "SQuAD",
-      "category": "Dataset",
-      "description": "Question answering benchmark"
-    }
-  ]
-}
+```text
+(TopLevelTopic)-[:HAS_SUBTOPIC]->(Subtopic)
+(TopLevelTopic|Subtopic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
+(Chunk)-[:CONTAINS_MENTION]->(Mention)-[:REFERS_TO]->(Entity)
 ```
 
-The extraction prompt and validation logic are in
-[`entity_extractor.py`](src/graph_rag/graph/entity_extractor.py).
+`Paper` is the document identity. `Chunk` provides retrieval granularity.
+`Mention` is the exact text phrase, while `Entity` is the canonical object that
+one or more mentions refer to.
 
-## 3. LLM relationship extraction
+For example, "Ahmed", "he", and "the director" can be three mentions that all
+refer to one `Person` entity. Ambiguous mentions remain unresolved rather than
+creating a false person.
 
-The LLM also determines semantic relationships between entities by interpreting
-the meaning of the paper text.
+## Semantic relations
 
-Supported relationship types are:
+Allowed relations are controlled in application code:
 
+- `AUTHORED`
+- `AFFILIATED_WITH`
+- `HOLDS_ROLE`
 - `PROPOSES`
 - `EVALUATES_ON`
 - `USES_METHOD`
 - `PART_OF_TOPIC`
+- `REPORTS`
 - `RELATED_TO`
 
-For example, the sentence:
+Every relation stores the source `paper_id`, `chunk_id`, evidence text,
+confidence, dataset ID, and extraction version. Model-generated relationship
+types outside the whitelist are rejected before a Cypher query is built.
 
-```text
-We evaluate BERT on the SQuAD dataset.
-```
+## Entity resolution
 
-can produce:
+Chunks are processed in paper order. Before extracting a later chunk, the model
+receives a compact registry of entities already found in that paper. It must
+reuse an existing entity ID for pronouns, aliases, and role descriptions when
+the context is clear.
 
-```json
-{
-  "source": "BERT",
-  "target": "SQuAD",
-  "relation_type": "EVALUATES_ON",
-  "description": "BERT is evaluated on the SQuAD dataset"
-}
-```
+Methods, datasets, topics, metrics, and tasks use stable normalized identities.
+Potentially ambiguous people, organizations, and findings remain paper-scoped
+until stronger cross-paper evidence is available. This avoids merging two
+people merely because they share a name.
 
-This becomes the Neo4j relationship:
+## Topic taxonomy
 
-```cypher
-(:Entity {name: "BERT"})-[:EVALUATES_ON]->(:Entity {name: "SQuAD"})
-```
+The initial active topics are:
 
-## 4. Merging the complete paper graph
+- Machine Learning
+- Computer Vision
+- Natural Language Processing
 
-The extraction results from all chunks are combined into one paper-wide graph.
+Known aliases such as `ML`, `CV`, and `NLP` map deterministically to their
+canonical `TopLevelTopic`. Specialist areas become `Subtopic` nodes connected
+to their parent by `HAS_SUBTOPIC`. A genuinely new domain is created as a
+candidate top-level topic and can later be reviewed and promoted. Papers and
+subtopics may connect to multiple top-level topics.
 
-Entities are deduplicated using:
+## Cloud models and vector versioning
 
-```text
-entity name + entity category
-```
+Generation and embeddings use configurable OpenRouter endpoints. Credentials
+and exact model IDs live only in `.env`.
 
-Relationships are deduplicated using:
+Changing the embedding model or its dimensions requires a new ChromaDB
+collection. Schema v2 defaults to `research_papers_graph_v2`; vectors from the
+previous local model are never mixed with the new cloud vectors.
 
-```text
-source + target + relationship type
-```
+## Fresh-corpus workflow
 
-If duplicate entities have different descriptions, the longest description is
-kept. Relationships are retained only when both endpoint entities exist in the
-merged entity set.
+1. Configure the new Neo4j instance in `.env`.
+2. Place only the new corpus in `pdfs/`.
+3. Start with a fresh `metadata.csv` for that corpus.
+4. Configure chat and embedding model IDs.
+5. Run ingestion on three to five papers first.
+6. Inspect topic assignments, unresolved mentions, duplicate entities, and
+   evidence quality before ingesting the full corpus.
 
-## 5. Neo4j graph structure
-
-Each paper is stored as a `Document` node:
-
-```cypher
-(:Document {
-  name,
-  title,
-  topic,
-  source
-})
-```
-
-Each extracted entity is stored as an `Entity` node:
-
-```cypher
-(:Entity {
-  name,
-  category,
-  description
-})
-```
-
-The paper is connected to its entities with `MENTIONS` relationships:
-
-```cypher
-(:Document)-[:MENTIONS]->(:Entity)
-```
-
-The semantic relationships extracted by the LLM connect entity nodes:
-
-```cypher
-(:Entity)-[:USES_METHOD]->(:Entity)
-(:Entity)-[:EVALUATES_ON]->(:Entity)
-(:Entity)-[:PART_OF_TOPIC]->(:Entity)
-```
-
-Neo4j write and merge behavior is implemented in
-[`graph_builder.py`](src/graph_rag/graph/graph_builder.py).
-
-## 6. LLM timeout and fallback behavior
-
-Ollama requests use a 180-second timeout and retry timed-out requests up to two
-times. If all attempts fail, the extractor uses a rule-based fallback.
-
-The fallback:
-
-- Adds the document title as a method-like entity.
-- Detects capitalized acronyms such as `BERT`, `CNN`, `LSTM`, `ASR`, and `NLP`.
-- Creates basic `USES_METHOD` relationships.
-
-This fallback allows ingestion to continue, but it may produce fewer entities
-and relationships than the LLM extraction.
-
-## 7. End-to-end graph flow
-
-```text
-Paper
-  |
-  v
-Parse document
-  |
-  v
-Split into chunks
-  |
-  v
-Send every chunk to Ollama
-  |
-  v
-Extract entities and relationships
-  |
-  v
-Merge and deduplicate paper-wide results
-  |
-  v
-Create Document and Entity nodes in Neo4j
-  |
-  v
-Create MENTIONS and semantic relationships
-```
-
-## 8. Architecture visualization
-
-```mermaid
-flowchart TD
-    A[Parsed paper] --> B[Paper chunks]
-    B --> C[Chunk 1]
-    B --> D[Chunk 2]
-    B --> E[Chunk N]
-
-    C --> F[Ollama entity and relationship extraction]
-    D --> F
-    E --> F
-
-    F --> G[Entities: name, category, description]
-    F --> H[Relationships: source, target, type, description]
-    G --> I[Paper-wide entity aggregation]
-    H --> J[Paper-wide relationship aggregation]
-    I --> K[Deduplicate by normalized name + category]
-    J --> L[Deduplicate by source + target + type]
-    K --> M[Validated entities]
-    L --> N[Validated relationships]
-    M --> O[Ensure relationship endpoints exist]
-    N --> O
-
-    O --> P[Neo4j graph builder]
-    P --> Q[MERGE Document node]
-    P --> R[MERGE Entity nodes]
-    Q --> S[CREATE MENTIONS edges]
-    R --> S
-    O --> T[CREATE semantic edges]
-
-    F -. timeout .-> V[Retry up to 2 times]
-    V -. retries exhausted .-> U[Rule-based fallback]
-    U --> G
-```
-
-### Component responsibilities
-
-| Graph component | Responsibility |
-|---|---|
-| Paper chunks | The complete paper sections sent for graph extraction |
-| Ollama LLM | Identifies entities and semantic relationships in each chunk |
-| Graph aggregator | Combines results from every chunk in the paper |
-| Entity deduplication | Merges entities by normalized name and category |
-| Relationship deduplication | Merges relationships by source, target, and type |
-| Neo4j graph builder | Writes the final nodes and relationships |
-| Rule-based fallback | Keeps graph extraction running after repeated LLM timeouts |
-
-### What the LLM creates
-
-For each chunk, the LLM returns two collections:
-
-```json
-{
-  "entities": [
-    {
-      "name": "BERT",
-      "category": "Method",
-      "description": "Transformer-based language model"
-    }
-  ],
-  "relations": [
-    {
-      "source": "BERT",
-      "target": "SQuAD",
-      "relation_type": "EVALUATES_ON",
-      "description": "BERT is evaluated on SQuAD"
-    }
-  ]
-}
-```
-
-The entity becomes an `Entity` node in Neo4j. The relation becomes a typed
-relationship between two `Entity` nodes:
-
-```cypher
-(:Entity {name: "BERT", category: "Method"})
-  -[:EVALUATES_ON]->
-(:Entity {name: "SQuAD", category: "Dataset"})
-```
-
-The paper itself is stored as a `Document` node, and every extracted entity is
-connected to it:
-
-```cypher
-(:Document)-[:MENTIONS]->(:Entity)
-```
-
-The LLM determines relationship types from the meaning of the text. For
-example, a sentence stating that a method is tested on a benchmark can produce
-`EVALUATES_ON`; a sentence describing a new technique can produce `PROPOSES`.
-
-To rebuild the graph for already-ingested papers without duplicating vector
-embeddings, run:
-
-```powershell
-uv run python scripts/ingest.py --rebuild-graph
-```
+See `GRAPH_REDESIGN_PLAN.md` for the rollout and design decisions.

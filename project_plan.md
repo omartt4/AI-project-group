@@ -1,4 +1,9 @@
-# 📋 Graph RAG Chatbot — Project Plan
+# 📋 Legacy Graph RAG Chatbot — Project Plan
+
+> **Historical v1 document:** This file describes the original Ollama-based
+> architecture and the previous corpus. It is retained for project history only.
+> The active cloud-model and evidence-first design is documented in
+> `GRAPH_REDESIGN_PLAN.md` and `GRAPH_KNOWLEDGE_BUILDING.md`.
 
 ## Overview
 

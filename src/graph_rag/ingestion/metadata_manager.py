@@ -29,7 +29,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
     """Score broad research areas using document title and text."""
     content = f"{title} {text}".lower()
     return {
-        "NLP": sum(
+        "Natural Language Processing": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "natural language",
@@ -46,7 +46,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
                 "agent",
             )
         ),
-        "Computer_Vision": sum(
+        "Computer Vision": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "computer vision",
@@ -59,7 +59,7 @@ def _topic_scores(title: str = "", text: str = "") -> Dict[str, int]:
                 "scene",
             )
         ),
-        "Machine_Learning": sum(
+        "Machine Learning": sum(
             len(re.findall(rf"\b{re.escape(keyword)}\b", content))
             for keyword in (
                 "machine learning",
@@ -83,7 +83,7 @@ def infer_topics(title: str = "", text: str = "") -> str:
     scores = _topic_scores(title, text)
     highest = max(scores.values())
     if not highest:
-        return "Machine_Learning"
+        return "Unclassified"
     selected = [topic for topic, score in scores.items() if score >= highest * 0.5]
     return "; ".join(selected)
 
@@ -266,6 +266,17 @@ class MetadataManager:
                 df.loc[mask, "file_hash"] = file_hash.strip().lower()
                 df.loc[mask, "ingested_at"] = datetime.now(timezone.utc).isoformat()
                 df.to_csv(self.metadata_path, index=False)
+
+    def remove_document(self, local_pdf: str) -> int:
+        """Remove metadata rows for one exact local filename."""
+        with _csv_lock:
+            df = self.load_metadata()
+            target_name = Path(local_pdf).name.strip().lower()
+            mask = df["local_pdf"].astype(str).str.strip().str.lower() == target_name
+            removed = int(mask.sum())
+            if removed:
+                df.loc[~mask].to_csv(self.metadata_path, index=False)
+            return removed
 
     def get_document_count(self) -> int:
         """Return total count of documents registered."""

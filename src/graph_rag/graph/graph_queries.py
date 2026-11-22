@@ -21,14 +21,20 @@ class GraphQueries:
 
         query = """
         MATCH (e:Entity)
-        WHERE toLower(e.name) CONTAINS toLower($kw)
+        WHERE e.dataset_id = $dataset_id
+          AND toLower(e.name) CONTAINS toLower($kw)
         RETURN e.name AS name, e.category AS category, e.description AS description
         LIMIT $limit
         """
         results = []
         try:
             with driver.session() as session:
-                for record in session.run(query, kw=keyword, limit=limit):
+                for record in session.run(
+                    query,
+                    kw=keyword,
+                    limit=limit,
+                    dataset_id=graph_builder.dataset_id,
+                ):
                     results.append(
                         {
                             "name": record["name"],
@@ -48,14 +54,21 @@ class GraphQueries:
             return []
 
         query = """
-        MATCH (e:Entity {name: $name})-[r]-(neighbor:Entity)
-        RETURN e.name AS source, type(r) AS relation, neighbor.name AS target, neighbor.category AS target_category
+        MATCH (e:Entity {name: $name, dataset_id: $dataset_id})-[r]-(neighbor)
+        WHERE neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
+        RETURN e.name AS source, type(r) AS relation,
+               coalesce(neighbor.name, neighbor.title) AS target,
+               CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS target_category
         LIMIT 15
         """
         relationships = []
         try:
             with driver.session() as session:
-                for record in session.run(query, name=entity_name):
+                for record in session.run(
+                    query,
+                    name=entity_name,
+                    dataset_id=graph_builder.dataset_id,
+                ):
                     relationships.append(
                         {
                             "source": record["source"],
@@ -76,15 +89,22 @@ class GraphQueries:
             return []
 
         query = """
-        MATCH (d:Document)-[:MENTIONS]->(e:Entity)
-        WHERE e.name IN $names
-        RETURN DISTINCT d.name AS document_name, d.title AS title
+        MATCH (p:Paper)-[r]->(e:Entity)
+        WHERE p.dataset_id = $dataset_id
+          AND e.dataset_id = $dataset_id
+          AND e.name IN $names
+          AND type(r) IN ['MENTIONS', 'CONTAINS_ENTITY', 'USES_METHOD', 'EVALUATES_ON']
+        RETURN DISTINCT p.paper_id AS document_name, p.title AS title
         LIMIT 10
         """
         docs = []
         try:
             with driver.session() as session:
-                for record in session.run(query, names=entity_names):
+                for record in session.run(
+                    query,
+                    names=entity_names,
+                    dataset_id=graph_builder.dataset_id,
+                ):
                     docs.append(record["document_name"])
         except Exception:
             pass

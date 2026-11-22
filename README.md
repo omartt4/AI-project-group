@@ -1,6 +1,6 @@
 # 🧬 Graph RAG Chatbot Studio
 
-> A scientific research assistant powered by **Hybrid Graph RAG** (Knowledge Graph + Vector Embeddings) and **Local Ollama Models**. Includes user authentication, persistent chat history, document uploads with strict deduplication, and a live RAG evaluation dashboard.
+> A scientific research assistant powered by **Hybrid Graph RAG** (Knowledge Graph + Vector Embeddings), **Neo4j**, and configurable cloud models through **OpenRouter**. Includes evidence-backed graph construction, user authentication, persistent chat history, strict document deduplication, and live RAG evaluation.
 
 ---
 
@@ -12,10 +12,11 @@
   - **Diversity-Aware MMR (Maximal Marginal Relevance)**: Eliminates redundant passages across candidate embeddings while enforcing cross-document coverage across distinct papers.
   - **Graph-Based Concept Discovery**: Traverses **Neo4j** for multi-hop entity neighborhoods, bridge concepts between comparative targets, and central thematic hubs.
   - **Structured Evidence Aggregation**: Fuses MMR vector excerpts, graph pathways, and cross-references into an attributed context payload.
-  - **Adaptive LLM Synthesis**: Tailors **Ollama** prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
-- **100% Local & Privacy-Preserving**: Runs locally via **Ollama** (`qwen2.5` for generation/entity extraction, `nomic-embed-text` for embeddings). No API keys or external data transmission.
+  - **Adaptive LLM Synthesis**: Tailors cloud-model prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
+- **Task-Specific Cloud Models**: Extraction, answer generation, evaluation, and embeddings each use an explicit OpenRouter model selected in `.env`; credentials are never committed.
+- **Evidence-First Graph**: Top-level topics, subtopics, papers, chunks, mentions, and canonical entities are separate graph objects. Every semantic relation keeps its paper, chunk, evidence, confidence, and extraction version.
 - **Dual Data Sources**:
-  1. **Initial Repository**: 93 research papers pre-loaded in the `pdfs/` folder.
+  1. **Initial Repository**: The current research corpus placed in the `pdfs/` folder.
   2. **Dynamic UI Uploads**: Users can upload new papers directly in the Streamlit UI.
 - **Strict Deduplication & Metadata Protection**:
   - `pdfs/metadata.csv` acts as the single source of truth and catalog.
@@ -38,7 +39,7 @@ flowchart LR
     UI --> Query[Ask a question]
     Query --> Retrieve[Hybrid retrieval]
     Retrieve --> Stores
-    Retrieve --> LLM[Ollama]
+    Retrieve --> LLM[OpenRouter Cloud Model]
     LLM --> Answer[Grounded answer]
     Answer --> Eval[Evaluation]
     Eval --> SQLite[(SQLite)]
@@ -61,14 +62,14 @@ graph TB
     end
 
     subgraph "Document Ingestion & Deduplication"
-        InitPDFs["pdfs/ Folder (93 Papers)"] --> DedupCheck
+        InitPDFs["Current pdfs/ Corpus"] --> DedupCheck
         UserUploads["User Uploads (PDF/DOCX/PPTX/Archives)"] --> DedupCheck
         DedupCheck{"3-Layer Dedup Check<br>(Hash, Filename, Title)"}
         DedupCheck -->|Duplicate| Reject["🚫 Reject: Do not save, do not process"]
         DedupCheck -->|Genuinely New| Save["Save to pdfs/ & Parse Document"]
         Save --> Chunk[Text Chunker: 1000 tokens]
-        Chunk --> Embed[Ollama: nomic-embed-text]
-        Chunk --> EntityExtract[Ollama: qwen2.5]
+        Chunk --> Embed[OpenRouter Embedding Model]
+        Chunk --> EntityExtract[OpenRouter Extraction Model]
         Save --> MetaCSV["Append to pdfs/metadata.csv"]
     end
 
@@ -83,9 +84,9 @@ graph TB
         HybridRetriever --> Chroma
         HybridRetriever --> Neo4j
         Chroma & Neo4j --> Assembly[Context & Citation Assembly]
-        Assembly --> LLM[Ollama: qwen2.5]
+        Assembly --> LLM[OpenRouter Answer Model]
         LLM --> Answer[Answer + Attributed Citations]
-        Answer --> Judge[LLM-as-a-Judge Evaluation]
+        Answer --> Judge[OpenRouter Evaluation Model]
         Judge --> EvalDash
     end
 ```
@@ -118,9 +119,9 @@ flowchart TD
         Save["Save new document"]
         Parse["Parse document text and metadata"]
         Chunk["Split into page-aware chunks"]
-        Embed["Batch embeddings<br>Ollama: nomic-embed-text"]
+        Embed["Batch embeddings<br>Embedding model"]
         VectorStore[("ChromaDB<br>chunks + embeddings")]
-        Extract["Extract entities and relations<br>Ollama: qwen2.5"]
+        Extract["Extract entities, mentions, and relations<br>Extraction model"]
         GraphStore[("Neo4j<br>nodes + relationships")]
         Metadata[("metadata.csv<br>file hash + ingestion status")]
     end
@@ -130,7 +131,7 @@ flowchart TD
         VectorSearch["Semantic similarity search"]
         GraphSearch["Entity and subgraph search"]
         Context["Assemble context and citations"]
-        Generate["Generate answer<br>Ollama: qwen2.5"]
+        Generate["Generate grounded answer<br>Answer model"]
         Answer["Answer with paper and page citations"]
         Evaluate["LLM-as-Judge evaluation"]
     end
@@ -195,7 +196,7 @@ flowchart TD
    as entities and relationships in Neo4j.
 3. **Hybrid retrieval**: Each question searches both ChromaDB for relevant text
    and Neo4j for connected graph facts. The results are merged with citations.
-4. **Answer generation**: Ollama generates an answer grounded in the assembled
+4. **Answer generation**: The configured cloud model generates an answer grounded in the assembled
    context and the relevant paper/page sources.
 5. **Evaluation and observability**: Faithfulness, answer relevance, context
    relevance, and stage latency are stored in SQLite. Runtime events are also
@@ -206,7 +207,7 @@ flowchart TD
 ## 📊 How It Works (In Simple Words)
 
 1. **Initial Startup (Mode A)**:
-   The system scans the `pdfs/` folder containing the research papers and checks `pdfs/metadata.csv`. Any papers not yet indexed are parsed, split into overlapping chunks, embedded using `nomic-embed-text` into ChromaDB, and their entities (authors, topics, methods, datasets) are inserted into Neo4j.
+   The system scans the current `pdfs/` corpus and checks `pdfs/metadata.csv`. New papers are parsed, split into overlapping chunks, embedded with the configured cloud embedding model, and written to a versioned ChromaDB collection and the evidence-first Neo4j graph.
 
 2. **When a User Uploads a File (Mode B)**:
    - When a user uploads a document or archive via the UI, the system calculates its SHA-256 fingerprint in memory.
@@ -218,7 +219,7 @@ flowchart TD
    - The query searches ChromaDB for semantically similar paragraphs.
    - It simultaneously queries Neo4j for connected entities and relationships.
    - Both results are combined into a structured prompt with source citations.
-   - `qwen2.5` answers the question with explicit references to paper titles and page numbers.
+   - The configured answer model responds with explicit references to paper titles and page numbers.
    - An automated judge evaluates the response's faithfulness, relevance, and latency live.
 
 ---
@@ -230,15 +231,13 @@ Follow these commands to configure and run the project from start to finish.
 ### 1. Prerequisites
 - **Python**: Version `3.12`
 - **UV Package Manager**: Installed on your system (`pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- **Ollama**: Installed and running locally ([Download Ollama](https://ollama.com/))
-- **Neo4j** *(Recommended)*: Running via Docker or Neo4j Desktop.
+- **OpenRouter**: An API key with access to the selected chat and embedding models.
+- **Neo4j**: A clean local, Aura, or managed instance for the redesigned graph.
 
-### 2. Pull Required Ollama Models
-Ensure Ollama is running, then pull the LLM and Embedding models:
-```bash
-ollama pull qwen2.5
-ollama pull nomic-embed-text
-```
+### 2. Choose Cloud Models
+Choose separate OpenRouter models for structured extraction, final answers,
+evaluation, and embeddings. Put their exact model IDs in the local `.env` file;
+model selection is configuration and does not require source-code changes.
 
 ### 3. Run Neo4j (Optional / Recommended)
 If you have Docker installed, start Neo4j with one command:
@@ -263,9 +262,15 @@ cp .env.example .env
 ```
 Key configuration items in `.env`:
 ```env
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_LLM_MODEL=qwen2.5
-OLLAMA_EMBED_MODEL=nomic-embed-text
+MODEL_API_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=replace-with-your-key
+OPENROUTER_EXTRACTION_MODEL=anthropic/claude-haiku-5.5
+OPENROUTER_CHAT_MODEL=google/gemini-3.8-flash
+OPENROUTER_EVAL_MODEL=anthropic/claude-haiku-5.5
+OPENROUTER_EMBED_MODEL=qwen/qwen3-embedding-8b
+EMBEDDING_DIMENSIONS=4096
+CHROMA_COLLECTION_NAME=research_papers_graph_v2
+DATASET_ID=research-v2
 
 NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
 NEO4J_USER=
@@ -287,14 +292,43 @@ Initialize all database tables (users, chat sessions, messages, evaluation logs)
 uv run python scripts/setup_db.py
 ```
 
-### 7. Run Batch Ingestion (Initial Papers)
+### 7. Test External Connections
+Verify the OpenRouter model IDs and Neo4j credentials without processing PDFs
+or running paid inference:
+```bash
+uv run python scripts/test_connections.py
+```
+To make minimal paid calls that also verify credits and model permissions:
+```bash
+uv run python scripts/test_connections.py --deep
+```
+
+### 8. Run Batch Ingestion (Initial Papers)
 To index the papers located in `pdfs/`:
 ```bash
 uv run python scripts/ingest.py
 ```
 *Tip: If you rerun this command, it checks `metadata.csv` and skips papers already ingested.*
 
-### 8. Launch the Streamlit Web Application
+Graph extraction now runs once per paper and is cached under
+`data/extraction_cache/`. A graph rebuild reuses that cache and does not call
+the extraction model again:
+```bash
+uv run python scripts/ingest.py --limit 3 --rebuild-graph
+```
+Only use `--refresh-extraction` when a deliberately fresh paid extraction is
+required. The CLI prints the tokens and OpenRouter-reported USD cost for every
+run, split by extraction and embedding. Chat and evaluation costs are shown in
+the application sidebar. Live evaluation is disabled by default during
+development to avoid extra judge-model calls.
+
+To migrate existing paper metadata to the hierarchical Top-level Topic →
+Subtopic model without re-embedding documents or calling an LLM:
+```bash
+uv run python scripts/rebuild_topic_hierarchy.py
+```
+
+### 9. Launch the Streamlit Web Application
 Start the interactive UI directly from the project root:
 ```bash
 uv run streamlit run app.py
@@ -350,16 +384,18 @@ graph-rag/
     │   └── pipeline.py           # Ingestion orchestrator (batch & upload)
     │
     ├── embeddings/
-    │   └── vector_store.py       # Persistent ChromaDB store + nomic-embed-text
+    │   └── vector_store.py       # Versioned ChromaDB store + cloud embeddings
     │
     ├── graph/
-    │   ├── entity_extractor.py   # qwen2.5 entity/relationship extraction
+    │   ├── entity_extractor.py   # Evidence-first entity/mention extraction
+    │   ├── entity_resolution.py  # Conservative paper-level identity registry
+    │   ├── topic_taxonomy.py     # Top-level topics + hierarchical subtopics
     │   ├── graph_builder.py      # Neo4j driver & node/edge creator
     │   ├── graph_queries.py      # Cypher multi-hop query helpers
     │   └── concept_discovery.py  # Concept neighborhood, bridge & hub engine
     │
     ├── llm/
-    │   └── ollama_client.py      # Ollama API client wrapper
+    │   └── model_client.py       # Role-specific OpenRouter model clients
     │
     ├── retriever/
     │   ├── query_classifier.py   # Query classification & dynamic parameters
