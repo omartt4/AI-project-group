@@ -1,17 +1,16 @@
-"""Paper-level entity registry for conservative coreference resolution."""
+"""Document-level entity registry for conservative coreference resolution."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from graph_rag.graph.entity_extractor import ExtractedEntity
 from graph_rag.graph.topic_taxonomy import topic_taxonomy
 
-
-GLOBAL_NAME_CATEGORIES = {"Method", "Dataset", "Topic", "Metric", "Task", "Tool"}
 
 _TRAILING_ALIAS = re.compile(r"^(?P<name>.+?)\s*\((?P<alias>[A-Za-z][A-Za-z0-9-]{1,11})\)\s*$")
 
@@ -33,11 +32,12 @@ def canonicalize_entity(entity: ExtractedEntity) -> ExtractedEntity:
     return entity
 
 
-class PaperEntityRegistry:
-    """Keeps stable IDs and known aliases while processing one paper in order."""
+class DocumentEntityRegistry:
+    """Keeps stable IDs and known aliases while processing one document."""
 
-    def __init__(self, paper_id: str) -> None:
-        self.paper_id = paper_id
+    def __init__(self, document_id: str) -> None:
+        self.document_id = document_id
+        self.paper_id = document_id
         self.entities: Dict[str, ExtractedEntity] = {}
         self._lookup: Dict[Tuple[str, str], List[str]] = {}
 
@@ -47,10 +47,8 @@ class PaperEntityRegistry:
         if category == "Topic":
             assignment = topic_taxonomy.identity_for_entity(entity.name)
             return f"topic:{assignment.key}"
-        scope = "global" if category in GLOBAL_NAME_CATEGORIES else self.paper_id
-        disambiguator = ""
-        if category not in GLOBAL_NAME_CATEGORIES:
-            disambiguator = normalize_entity_name(entity.description)[:80]
+        scope = self.document_id
+        disambiguator = normalize_entity_name(entity.description)[:80]
         digest = hashlib.sha256(
             f"{scope}|{category.casefold()}|{name}|{disambiguator}".encode("utf-8")
         ).hexdigest()[:24]
@@ -66,10 +64,21 @@ class PaperEntityRegistry:
         # Unknown model-generated IDs are discarded and replaced deterministically.
         entity.entity_id = ""
 
-        key = (normalize_entity_name(entity.name), entity.category.casefold())
-        candidates = self._lookup.get(key, [])
-        if len(candidates) == 1 and self._compatible(self.entities[candidates[0]], entity):
-            current = self.entities[candidates[0]]
+        candidates = {
+            candidate
+            for value in [entity.name, *entity.aliases]
+            for candidate in self._lookup.get(
+                (normalize_entity_name(value), entity.category.casefold()),
+                [],
+            )
+        }
+        compatible = [
+            candidate
+            for candidate in candidates
+            if self._compatible(self.entities[candidate], entity)
+        ]
+        if len(compatible) == 1:
+            current = self.entities[compatible[0]]
             self._merge(current, entity)
             return current
 
@@ -78,6 +87,19 @@ class PaperEntityRegistry:
             self._merge(self.entities[entity.entity_id], entity)
             return self.entities[entity.entity_id]
 
+        if entity.evidence:
+            entity.provenance = dict(entity.provenance or {})
+            entity.provenance.setdefault(
+                "evidence_records",
+                [
+                    {
+                        "evidence": entity.evidence,
+                        "confidence": entity.confidence,
+                        "source_ref": entity.source_ref,
+                        **entity.provenance,
+                    }
+                ],
+            )
         self.entities[entity.entity_id] = entity
         self._index(entity)
         return entity
@@ -97,8 +119,6 @@ class PaperEntityRegistry:
     @staticmethod
     def _compatible(current: ExtractedEntity, incoming: ExtractedEntity) -> bool:
         """Return whether a name match has enough evidence to merge safely."""
-        if current.category in GLOBAL_NAME_CATEGORIES:
-            return True
         shared_keys = set(current.attributes) & set(incoming.attributes)
         for key in shared_keys:
             left = normalize_entity_name(current.attributes[key])
@@ -127,6 +147,49 @@ class PaperEntityRegistry:
             current.description = incoming.description
         current.aliases = sorted(set(current.aliases) | set(incoming.aliases))
         current.attributes.update({k: v for k, v in incoming.attributes.items() if v})
+        evidence_records = list(
+            current.provenance.get("evidence_records", [])
+            if isinstance(current.provenance, dict)
+            else []
+        )
+        current_provenance = {
+            key: value
+            for key, value in (current.provenance or {}).items()
+            if key != "evidence_records"
+        }
+        current_record = {
+            "evidence": current.evidence,
+            "confidence": current.confidence,
+            "source_ref": current.source_ref,
+            **current_provenance,
+        }
+        if current.evidence and current_record not in evidence_records:
+            evidence_records.append(current_record)
+        incoming_provenance = {
+            key: value
+            for key, value in (incoming.provenance or {}).items()
+            if key != "evidence_records"
+        }
+        incoming_record = {
+            "evidence": incoming.evidence,
+            "confidence": incoming.confidence,
+            "source_ref": incoming.source_ref,
+            **incoming_provenance,
+        }
+        if incoming.evidence and incoming_record not in evidence_records:
+            evidence_records.append(incoming_record)
+        if incoming.confidence > current.confidence:
+            current.evidence = incoming.evidence
+            current.confidence = incoming.confidence
+            current.source_ref = incoming.source_ref
+            current.provenance = incoming_provenance
+        current.provenance = {
+            key: value
+            for key, value in (current.provenance or {}).items()
+            if key != "evidence_records"
+        }
+        if evidence_records:
+            current.provenance["evidence_records"] = evidence_records
         self._index(current)
 
     def resolve(
@@ -164,4 +227,195 @@ class PaperEntityRegistry:
             }
             for entity in self.entities.values()
         ]
+
+
+# Backward-compatible name for existing callers and cached integrations.
+PaperEntityRegistry = DocumentEntityRegistry
+
+
+class EntityResolver:
+    """Resolve document-local entities against canonical cross-document entities."""
+
+    def __init__(
+        self,
+        graph: Any,
+        vector_store: Any,
+        *,
+        similarity_threshold: float = 0.92,
+        minimum_margin: float = 0.05,
+    ) -> None:
+        self.graph = graph
+        self.vector_store = vector_store
+        self.similarity_threshold = similarity_threshold
+        self.minimum_margin = minimum_margin
+
+    @staticmethod
+    def _category_matches(left: str, right: str) -> bool:
+        return normalize_entity_name(left) == normalize_entity_name(right)
+
+    @staticmethod
+    def _attributes_match(entity: ExtractedEntity, candidate: Dict[str, Any]) -> bool:
+        attributes = candidate.get("attributes") or candidate.get("attributes_json") or {}
+        if isinstance(attributes, str):
+            try:
+                attributes = json.loads(attributes)
+            except json.JSONDecodeError:
+                attributes = {}
+        if not isinstance(attributes, dict):
+            return True
+        for key in set(entity.attributes) & set(attributes):
+            incoming = normalize_entity_name(str(entity.attributes[key]))
+            existing = normalize_entity_name(str(attributes[key]))
+            if incoming and existing and incoming != existing:
+                return False
+        return True
+
+    def resolve(
+        self,
+        entities: List[ExtractedEntity],
+    ) -> tuple[List[ExtractedEntity], List[Dict[str, Any]], set[str], Dict[str, str]]:
+        resolved: List[ExtractedEntity] = []
+        diagnostics: List[Dict[str, Any]] = []
+        ambiguous_ids: set[str] = set()
+        id_map: Dict[str, str] = {}
+        unresolved: List[ExtractedEntity] = []
+        queries: List[str] = []
+        for entity in entities:
+            original_id = entity.entity_id
+            exact = self.graph.find_entity_candidates(
+                name=entity.name,
+                category=entity.category,
+                aliases=entity.aliases,
+                attributes=entity.attributes,
+            )
+            exact_by_id = {
+                str(candidate.get("entity_id") or ""): candidate
+                for candidate in exact
+                if candidate.get("entity_id")
+                and self._category_matches(
+                    str(candidate.get("category") or ""),
+                    entity.category,
+                )
+                and self._attributes_match(entity, candidate)
+            }
+            if len(exact_by_id) == 1:
+                candidate = next(iter(exact_by_id.values()))
+                self._merge_candidate(entity, candidate)
+                id_map[original_id] = entity.entity_id
+                resolved.append(entity)
+                continue
+            if len(exact_by_id) > 1:
+                diagnostics.append(
+                    self._ambiguity(entity, list(exact_by_id.values()), "exact_identity")
+                )
+                ambiguous_ids.add(entity.entity_id)
+                id_map[original_id] = ""
+                continue
+            unresolved.append(entity)
+            queries.append(
+                " ".join(
+                    [
+                        entity.name,
+                        entity.category,
+                        entity.description,
+                        *entity.aliases,
+                        *[
+                            f"{key} {value}"
+                            for key, value in entity.attributes.items()
+                        ],
+                    ]
+                ).strip()
+            )
+
+        semantic_results = self.vector_store.search_entity_vectors_batch(queries)
+        for entity, candidates in zip(unresolved, semantic_results):
+            original_id = entity.entity_id
+            semantic = [
+                candidate
+                for candidate in candidates
+                if self._category_matches(
+                    str(candidate.get("category") or ""),
+                    entity.category,
+                )
+                and self._attributes_match(entity, candidate)
+            ]
+            eligible = [
+                candidate
+                for candidate in semantic
+                if float(candidate.get("similarity_score", 0.0))
+                >= self.similarity_threshold
+            ]
+            eligible.sort(
+                key=lambda candidate: float(candidate.get("similarity_score", 0.0)),
+                reverse=True,
+            )
+            if eligible and (
+                len(eligible) == 1
+                or float(eligible[0]["similarity_score"])
+                - float(eligible[1]["similarity_score"])
+                >= self.minimum_margin
+            ):
+                self._merge_candidate(entity, eligible[0])
+                id_map[original_id] = entity.entity_id
+                resolved.append(entity)
+                continue
+            if eligible:
+                diagnostics.append(self._ambiguity(entity, eligible, "semantic_similarity"))
+                ambiguous_ids.add(entity.entity_id)
+                id_map[original_id] = ""
+                continue
+            id_map[original_id] = entity.entity_id
+            resolved.append(entity)
+        return resolved, diagnostics, ambiguous_ids, id_map
+
+    @staticmethod
+    def _merge_candidate(
+        entity: ExtractedEntity,
+        candidate: Dict[str, Any],
+    ) -> None:
+        original_name = entity.name
+        entity.entity_id = str(candidate["entity_id"])
+        entity.name = str(candidate.get("name") or entity.name)
+        aliases = candidate.get("aliases") or candidate.get("aliases_json") or []
+        if isinstance(aliases, str):
+            try:
+                aliases = json.loads(aliases)
+            except json.JSONDecodeError:
+                aliases = [aliases]
+        entity.aliases = sorted(set(entity.aliases + list(aliases) + [original_name]))
+        try:
+            attributes = candidate.get("attributes") or candidate.get("attributes_json") or {}
+            if isinstance(attributes, str):
+                attributes = json.loads(attributes)
+        except json.JSONDecodeError:
+            attributes = {}
+        if isinstance(attributes, dict):
+            entity.attributes = {
+                **attributes,
+                **{key: value for key, value in entity.attributes.items() if value},
+            }
+
+    @staticmethod
+    def _ambiguity(
+        entity: ExtractedEntity,
+        candidates: List[Dict[str, Any]],
+        resolution_method: str,
+    ) -> Dict[str, Any]:
+        return {
+            "diagnostic_type": "ambiguous_entity_resolution",
+            "name": entity.name,
+            "category": entity.category,
+            "evidence": entity.evidence,
+            "confidence": entity.confidence,
+            "resolution_method": resolution_method,
+            "candidates": [
+                {
+                    "entity_id": candidate.get("entity_id", ""),
+                    "name": candidate.get("name", ""),
+                    "category": candidate.get("category", ""),
+                    "similarity_score": candidate.get("similarity_score"),
+                }
+                for candidate in candidates
+            ],
+        }
 

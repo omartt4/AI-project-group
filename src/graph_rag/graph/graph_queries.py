@@ -56,7 +56,7 @@ class GraphQueries:
         query = """
         MATCH (e:Entity {name: $name, dataset_id: $dataset_id})-[r]-(neighbor)
         WHERE neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
-        RETURN e.name AS source, type(r) AS relation,
+        RETURN e.name AS source, coalesce(r.relation_type, type(r)) AS relation,
                coalesce(neighbor.name, neighbor.title) AS target,
                CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS target_category
         LIMIT 15
@@ -93,7 +93,6 @@ class GraphQueries:
         WHERE p.dataset_id = $dataset_id
           AND e.dataset_id = $dataset_id
           AND e.name IN $names
-          AND type(r) IN ['MENTIONS', 'CONTAINS_ENTITY', 'USES_METHOD', 'EVALUATES_ON']
         RETURN DISTINCT p.paper_id AS document_name, p.title AS title
         LIMIT 10
         """

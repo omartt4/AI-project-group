@@ -1,6 +1,7 @@
 """Metadata manager for the document registry."""
 
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -19,6 +20,9 @@ EXPECTED_COLUMNS = [
     "abstract",
     "categories",
     "local_pdf",
+    "file_type",
+    "mime_type",
+    "language",
     "source",
     "file_hash",
     "ingested_at",
@@ -100,13 +104,29 @@ class MetadataManager:
         self.metadata_path = metadata_path or settings.METADATA_FILE
         self._ensure_file_and_columns()
 
+    def _write_metadata(self, dataframe: pd.DataFrame) -> None:
+        """Atomically replace metadata.csv so an interrupted write keeps the prior file."""
+        self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.metadata_path.with_name(
+            f".{self.metadata_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            dataframe.to_csv(temp_path, index=False)
+            temp_path.replace(self.metadata_path)
+        except Exception:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
     def _ensure_file_and_columns(self) -> None:
         """Ensure metadata.csv exists and has all required schema columns."""
         with _csv_lock:
             if not self.metadata_path.exists():
                 self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
                 df = pd.DataFrame(columns=EXPECTED_COLUMNS)
-                df.to_csv(self.metadata_path, index=False)
+                self._write_metadata(df)
                 return
 
             try:
@@ -138,7 +158,7 @@ class MetadataManager:
                 modified = True
 
             if modified:
-                df.to_csv(self.metadata_path, index=False)
+                self._write_metadata(df)
 
     @staticmethod
     def _repair_upload_rows(df: pd.DataFrame) -> bool:
@@ -191,8 +211,7 @@ class MetadataManager:
             if not self.metadata_path.exists():
                 return pd.DataFrame(columns=EXPECTED_COLUMNS)
             df = pd.read_csv(self.metadata_path)
-            # Fill NaNs with empty string for string columns
-            return df.fillna("")
+            return df.astype(object).where(pd.notna(df), "")
 
     def get_known_hashes(self) -> Set[str]:
         """Return set of all non-empty SHA-256 hashes present in registry."""
@@ -254,9 +273,16 @@ class MetadataManager:
 
             new_df = pd.DataFrame([new_row])
             updated_df = pd.concat([df, new_df], ignore_index=True)
-            updated_df.to_csv(self.metadata_path, index=False)
+            self._write_metadata(updated_df)
 
-    def mark_as_ingested(self, local_pdf: str, file_hash: str) -> None:
+    def mark_as_ingested(
+        self,
+        local_pdf: str,
+        file_hash: str,
+        file_type: str = "",
+        mime_type: str = "",
+        language: str = "",
+    ) -> None:
         """Update existing row with hash and ingested_at timestamp."""
         with _csv_lock:
             df = self.load_metadata()
@@ -265,7 +291,13 @@ class MetadataManager:
             if mask.any():
                 df.loc[mask, "file_hash"] = file_hash.strip().lower()
                 df.loc[mask, "ingested_at"] = datetime.now(timezone.utc).isoformat()
-                df.to_csv(self.metadata_path, index=False)
+                if file_type:
+                    df.loc[mask, "file_type"] = file_type
+                if mime_type:
+                    df.loc[mask, "mime_type"] = mime_type
+                if language:
+                    df.loc[mask, "language"] = language
+                self._write_metadata(df)
 
     def remove_document(self, local_pdf: str) -> int:
         """Remove metadata rows for one exact local filename."""
@@ -275,7 +307,7 @@ class MetadataManager:
             mask = df["local_pdf"].astype(str).str.strip().str.lower() == target_name
             removed = int(mask.sum())
             if removed:
-                df.loc[~mask].to_csv(self.metadata_path, index=False)
+                self._write_metadata(df.loc[~mask])
             return removed
 
     def get_document_count(self) -> int:

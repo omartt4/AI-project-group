@@ -8,24 +8,26 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from langchain_core.documents import Document as LangChainDocument
+from langchain_core.messages import AIMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableLambda
+from langchain_neo4j import LLMGraphTransformer
+from pydantic import BaseModel, Field, ValidationError
+
 from graph_rag.config import settings
-from graph_rag.llm.model_client import extraction_model_client
+from graph_rag.ingestion.document_structure import StructuredDocumentInput
+from graph_rag.llm.json_mode_adapter import JsonModeChatModel
+from graph_rag.llm.model_client import (
+    ModelUsageCallbackHandler,
+    extraction_model_client,
+)
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_ENTITY_CATEGORIES = frozenset({
-    "Person", "Organization", "Method", "Dataset",
-})
-
-ALLOWED_RELATION_TYPES = {
-    "AUTHORED", "AFFILIATED_WITH", "HOLDS_ROLE", "PROPOSES",
-    "EVALUATES_ON", "USES_METHOD", "PART_OF_TOPIC", "REPORTS", "RELATED_TO",
-}
-
-
 @dataclass
 class ExtractedEntity:
-    """Canonical entity candidate within the current paper."""
+    """Canonical, evidence-grounded entity extracted from a document."""
 
     name: str
     category: str
@@ -33,6 +35,10 @@ class ExtractedEntity:
     entity_id: str = ""
     aliases: List[str] = field(default_factory=list)
     attributes: Dict[str, str] = field(default_factory=dict)
+    evidence: str = ""
+    confidence: float = 0.0
+    source_ref: str = ""
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,10 +50,13 @@ class ExtractedMention:
     entity_category: str = ""
     entity_id: str = ""
     mention_type: str = "name"
+    attributes: Dict[str, str] = field(default_factory=dict)
     evidence: str = ""
     confidence: float = 0.0
     chunk_id: str = ""
     mention_id: str = ""
+    source_ref: str = ""
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,64 +74,175 @@ class ExtractedRelation:
     evidence: str = ""
     confidence: float = 0.0
     chunk_id: str = ""
+    source_ref: str = ""
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class GraphExtractionResult:
-    """Entities, their textual mentions, and evidence-backed relations."""
+    """Document facts, topic proposals, and non-blocking extraction diagnostics."""
 
     entities: List[ExtractedEntity] = field(default_factory=list)
     mentions: List[ExtractedMention] = field(default_factory=list)
     relations: List[ExtractedRelation] = field(default_factory=list)
+    topics: List["ExtractedTopic"] = field(default_factory=list)
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    document_type: str = "unknown"
+    cache_stage: str = "ready"
 
 
-EXTRACTION_PROMPT_TEMPLATE = """You extract an evidence-first knowledge graph from one research-paper chunk.
+@dataclass
+class ExtractedTopic:
+    """A topic candidate grounded in document evidence."""
+
+    name: str
+    parent_names: List[str] = field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
+    evidence: str = ""
+    confidence: float = 0.0
+    source_ref: str = ""
+    provenance: Dict[str, Any] = field(default_factory=dict)
+
+
+class EntityOutput(BaseModel):
+    entity_id: str = ""
+    name: str
+    category: str
+    description: str = ""
+    aliases: List[str] = Field(default_factory=list)
+    attributes: Dict[str, str] = Field(default_factory=dict)
+    evidence: str = ""
+    confidence: float = 0.0
+    source_ref: str = ""
+
+
+class MentionOutput(BaseModel):
+    text: str
+    entity_id: str = ""
+    entity_name: str = ""
+    entity_category: str = ""
+    mention_type: str = "name"
+    attributes: Dict[str, str] = Field(default_factory=dict)
+    evidence: str = ""
+    confidence: float = 0.0
+    source_ref: str = ""
+
+
+class RelationOutput(BaseModel):
+    source_entity_id: str = ""
+    source: str
+    source_category: str = ""
+    target_entity_id: str = ""
+    target: str
+    target_category: str = ""
+    relation_type: str
+    description: str = ""
+    evidence: str = ""
+    confidence: float = 0.0
+    source_ref: str = ""
+
+
+class TopicOutput(BaseModel):
+    name: str
+    parent_names: List[str] = Field(default_factory=list)
+    aliases: List[str] = Field(default_factory=list)
+    evidence: str
+    confidence: float = 0.0
+    source_ref: str = ""
+
+
+class GraphExtractionOutput(BaseModel):
+    document_type: str = "unknown"
+    entities: List[EntityOutput] = Field(default_factory=list)
+    mentions: List[MentionOutput] = Field(default_factory=list)
+    relations: List[RelationOutput] = Field(default_factory=list)
+    topics: List[TopicOutput] = Field(default_factory=list)
+
+
+EXTRACTION_PROMPT_TEMPLATE = """Extract an evidence-first, open-schema knowledge graph from this document region.
 
 Document title: {document_title}
-Chunk ID: {chunk_id}
+Source reference: {chunk_id}
 
-Entities already known in this paper:
+Known entities from this document:
 {known_entities}
 
 Rules:
-1. Reuse an existing entity_id when a name, alias, pronoun, or role phrase refers to a known entity.
-2. A mention is the exact phrase in this chunk. An entity is the real object it refers to.
-3. Do not create a new Person for phrases such as "the director", "the doctor", "he", or "she" unless the text clearly introduces a different person.
-4. If a mention is ambiguous, keep entity_id empty and lower its confidence.
-5. Every relation must quote short supporting evidence from this chunk.
-6. Do not infer facts that the text does not state.
-7. New entities must leave entity_id empty; the application assigns their stable ID.
-8. Do not extract Topic entities here. Paper topics are classified once from title,
-   abstract, keywords, and metadata by the topic-taxonomy stage.
-9. Create entities only for reusable, named objects. Do not create entities for
-   table/figure references, citation groups such as "Zhu et al.", parameter values,
-   generic words such as "accuracy", or extraction commentary.
-10. Findings, metrics, tasks, and tools are not nodes. Preserve them in a
-    relation description, evidence, or entity attributes when relevant.
-11. Extract only methods and datasets actually proposed, used, or evaluated by
-    this paper; ignore items merely listed in related work or references.
-12. Do not create Person nodes solely from the paper byline or bibliography.
-13. Put acronyms and alternate spellings in aliases instead of creating another entity.
-14. For a Person identified by a role phrase, set attributes.role and
-    attributes.organization whenever the text states them.
-
-Allowed entity categories:
-Person, Organization, Method, Dataset
-
-Allowed relation types:
-AUTHORED, AFFILIATED_WITH, HOLDS_ROLE, PROPOSES, EVALUATES_ON,
-USES_METHOD, PART_OF_TOPIC, REPORTS, RELATED_TO
+1. Discover entities, their types, relationships, relationship types, aliases,
+   properties, topics, subtopics, and document type from any domain.
+2. Do not use a fixed type, relationship, topic, or section taxonomy. Existing
+   types supplied in context are normalization hints only; keep valid new types.
+3. spaCy output is incomplete candidate assistance, never a fact or a reason
+   to reject source-supported information.
+4. Every entity and relationship must include an exact, short source quote,
+   source_ref, and confidence from 0 to 1. Never invent locations or offsets.
+5. Do not turn full sentences, unresolved pronouns, repeated boilerplate,
+   headers/footers, reference-list fragments, or meaningless generic wording
+   into entities or topics.
+6. If a reference is ambiguous, do not guess an identity or topic parent.
+   Return its evidence with an empty entity_id or omit the uncertain link.
+7. Reuse supplied entity IDs only when the evidence supports the identity.
+8. Use aliases for abbreviations and alternate names. Keep entity properties
+   open-ended and grounded in evidence.
+9. Topic and subtopic names are open-schema concepts, not entity-type labels.
+   Include a parent only when the source supports that hierarchy.
+10. Use concise discovered node types and relationship types. Relationship
+    types may be normalized to UPPER_SNAKE_CASE.
 
 Return JSON only:
 {{
-  "entities": [{{"entity_id": "existing ID or empty", "name": "canonical name", "category": "allowed category", "description": "disambiguating description", "aliases": ["alternate name"], "attributes": {{"role": "CEO", "organization": "Example Company"}}}}],
-  "mentions": [{{"text": "the director", "entity_id": "known ID when resolved", "entity_name": "canonical name", "entity_category": "Person", "mention_type": "name|alias|pronoun|role", "evidence": "source sentence", "confidence": 0.0}}],
-  "relations": [{{"source_entity_id": "known ID when available", "source": "canonical source name", "source_category": "allowed category", "target_entity_id": "known ID when available", "target": "canonical target name", "target_category": "allowed category", "relation_type": "allowed relation", "description": "short explanation", "evidence": "source sentence", "confidence": 0.0}}]
+  "document_type": "discovered type or unknown",
+  "entities": [{{"entity_id": "existing ID or empty", "name": "canonical name", "category": "discovered type", "description": "disambiguating description", "aliases": ["alternate name"], "attributes": {{"role": "stated role"}}, "evidence": "exact quote", "source_ref": "region reference", "confidence": 0.0}}],
+  "mentions": [{{"text": "exact source phrase", "entity_id": "known ID when resolved", "entity_name": "canonical name", "entity_category": "discovered type", "mention_type": "name|alias|pronoun|role|other", "attributes": {{}}, "evidence": "exact quote", "source_ref": "region reference", "confidence": 0.0}}],
+  "relations": [{{"source_entity_id": "known ID when available", "source": "canonical source name", "source_category": "discovered type", "target_entity_id": "known ID when available", "target": "canonical target name", "target_category": "discovered type", "relation_type": "discovered relationship", "description": "short explanation", "evidence": "exact quote", "source_ref": "region reference", "confidence": 0.0}}],
+  "topics": [{{"name": "open-schema topic", "parent_names": ["supported broader topic"], "aliases": [], "evidence": "exact quote", "source_ref": "region reference", "confidence": 0.0}}]
 }}
 
-Chunk text:
+Document region:
 {text}
 """
+
+GRAPH_TRANSFORMER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """Build an evidence-first, open-schema knowledge graph from any document domain.
+The source contains document type, structure, exact region references, and optional
+spaCy candidate hints. spaCy labels are incomplete suggestions, never a schema.
+Discover novel entity types, semantic relationship types, aliases, properties,
+topics, subtopics, and document type. Existing type labels are hints only.
+
+Return the source document as one node with id equal to the provided Document ID,
+type Document, and property document_type set to your best evidence-based
+classification or unknown. Do not treat this base node as an entity or topic.
+
+Every semantic entity node must have properties evidence (an exact short quote
+from one source region), source_ref (that region's exact reference), confidence
+(0-1), aliases (JSON array text), attributes (JSON object text), and mentions
+(JSON array text when specific mentions can be grounded). Every semantic
+relationship must have exact evidence, source_ref, confidence, and a concise
+description. Use properties as key/value strings.
+
+Represent topics as nodes of type Topic with evidence, source_ref, confidence,
+and aliases. Represent a supported parent-child topic hierarchy with a
+PARENT_OF relationship between Topic nodes. Do not force a hierarchy.
+
+Reject unsupported facts, generic meaningless phrases, full sentences as entity
+names, headers, footers, reference-list fragments, unresolved pronouns, and
+low-confidence guesses. Never invent locations, names, aliases, or evidence.
+If identity or parentage is ambiguous, omit the link and leave diagnostic
+evidence in a property when possible. Keep all valid types open-ended.
+
+For relationships, source_node_id and target_node_id must exactly match node
+ids. Return a JSON object with "nodes" and "relationships" arrays. Each node
+has "id", "type", and "properties"; each relationship has "source_node_id",
+"source_node_type", "target_node_id", "target_node_type", "type", and
+"properties". Properties are arrays of {{"key": "...", "value": "..."}} strings.
+Use arbitrary property keys only for grounded data.""",
+        ),
+        ("human", "{input}"),
+    ]
+)
 
 
 def _confidence(value: Any) -> float:
@@ -133,43 +253,422 @@ def _confidence(value: Any) -> float:
 
 
 def _category(value: Any) -> str:
-    raw = str(value or "").strip().casefold()
-    for allowed in ALLOWED_ENTITY_CATEGORIES:
-        if allowed.casefold() == raw:
-            return allowed
-    return ""
+    raw = " ".join(str(value or "").split())
+    if len(raw) > 80 or not any(character.isalnum() for character in raw):
+        return ""
+    return raw.title()
+
+
+def _relation_type(value: Any) -> str:
+    raw = re.sub(
+        r"[^\w]+",
+        "_",
+        str(value or "").strip().upper(),
+        flags=re.UNICODE,
+    ).strip("_")
+    if len(raw) > 80 or not any(character.isalnum() for character in raw):
+        return ""
+    return raw
+
+
+def _grounded(evidence: str, source_text: Optional[str]) -> bool:
+    if not evidence:
+        return False
+    if source_text is None:
+        return True
+    normalized_evidence = " ".join(evidence.casefold().split())
+    normalized_source = " ".join(source_text.casefold().split())
+    return normalized_evidence in normalized_source
 
 
 _REJECTED_NAME_PATTERNS = (
-    re.compile(r"^\d+\s+", re.IGNORECASE),
-    re.compile(r"^(?:table|figure|equation|section)\s+\d+\b", re.IGNORECASE),
-    re.compile(r"\b(?:name garbled|extraction error|cited work)\b", re.IGNORECASE),
+    re.compile(r"^(?:header|footer|page\s+\d+)\b", re.IGNORECASE),
     re.compile(r"\bet\s+al\.?$", re.IGNORECASE),
+    re.compile(r"^\[\s*\d+(?:\s*[,;\-]\s*\d+)*\s*\]"),
+    re.compile(r"^(?:doi|isbn|issn)\s*[:=]", re.IGNORECASE),
+    re.compile(r"^(?:references?|bibliography|works cited)\b", re.IGNORECASE),
 )
-
 _GENERIC_ENTITY_NAMES = {
-    "accuracy", "precision", "recall", "inference time",
-    "trainable parameters", "objective evaluation scores",
+    "analysis",
+    "data",
+    "document",
+    "he",
+    "her",
+    "hers",
+    "him",
+    "his",
+    "it",
+    "its",
+    "method",
+    "our",
+    "paper",
+    "research",
+    "she",
+    "study",
+    "that",
+    "these",
+    "they",
+    "this",
+    "those",
+    "we",
+    "work",
+    "you",
+    "هو",
+    "هي",
+    "هم",
+    "هن",
+    "هذا",
+    "هذه",
+    "ذلك",
+    "تلك",
+    "هؤلاء",
 }
 
 
 def _valid_entity_name(name: str, category: str) -> bool:
     """Reject obvious extraction artifacts without imposing an entity-count cap."""
-    if len(name) < 2 or not category:
+    if len(name) < 2 or len(name) > 300 or not category:
+        return False
+    normalized_name = " ".join(name.casefold().split())
+    if (
+        normalized_name in _GENERIC_ENTITY_NAMES and not name.isupper()
+    ) or len(name.split()) > 20:
         return False
     if any(pattern.search(name) for pattern in _REJECTED_NAME_PATTERNS):
         return False
-    if name.casefold().strip() in _GENERIC_ENTITY_NAMES:
+    sentence_endings = re.search(r"[.!?؟。]\s*$", name)
+    if sentence_endings and len(name.split()) > 3:
         return False
-    word_count = len(re.findall(r"\b\w+\b", name, flags=re.UNICODE))
-    return word_count <= 12
+    return any(character.isalnum() for character in name)
 
 
 class EntityExtractor:
-    """Extract graph facts while carrying paper-level entity context forward."""
+    """Extract open-schema graph facts from complete document structure."""
 
     def __init__(self, client=None) -> None:
         self.client = client or extraction_model_client
+
+    @staticmethod
+    def _property(properties: Dict[str, Any], key: str, default: Any = "") -> Any:
+        value = properties.get(key, default)
+        if isinstance(value, str) and key in {"aliases", "attributes", "mentions"}:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return default
+        return value
+
+    @staticmethod
+    def _source_match(
+        document: StructuredDocumentInput,
+        source_ref: str,
+        evidence: str,
+    ) -> tuple[Any, Optional[tuple[int, int]]]:
+        if not evidence.strip():
+            return None, None
+        candidates = [
+            block for block in document.blocks
+            if not source_ref or block.source_ref == source_ref
+        ]
+        if not candidates:
+            candidates = document.blocks
+        words = [word for word in re.split(r"\s+", evidence.strip()) if word]
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
+        matches = []
+        for block in candidates:
+            match = pattern.search(block.text)
+            if match:
+                matches.append((block, match.span()))
+        if len(matches) == 1:
+            return matches[0]
+        return None, None
+
+    @staticmethod
+    def _source_provenance(
+        document: StructuredDocumentInput,
+        block: Any,
+        span: tuple[int, int],
+    ) -> Dict[str, Any]:
+        start, end = span
+        if block.character_offsets and end > start:
+            absolute_start = block.character_offsets[start]
+            absolute_end = block.character_offsets[min(end - 1, len(block.character_offsets) - 1)] + 1
+        else:
+            absolute_start = (
+                block.start_offset + start
+                if block.start_offset is not None
+                else start
+            )
+            absolute_end = (
+                block.start_offset + end
+                if block.start_offset is not None
+                else end
+            )
+        return {
+            "document_id": document.document_id,
+            "page_number": block.page_number,
+            "sheet_name": block.sheet_name,
+            "section": block.section,
+            "source_offsets": [{"start": absolute_start, "end": absolute_end}],
+            "bounding_boxes": block.bounding_boxes,
+            "extraction_model": settings.EXTRACTION_MODEL,
+            "extraction_version": settings.EXTRACTION_VERSION,
+        }
+
+    def extract_document(
+        self,
+        document: StructuredDocumentInput,
+    ) -> GraphExtractionResult:
+        """Use LangChain's open-schema graph transformer with enforced JSON mode."""
+        if not hasattr(self.client, "as_chat_model"):
+            raise RuntimeError("The configured extraction client must expose a LangChain chat model")
+
+        transformer = LLMGraphTransformer(
+            llm=JsonModeChatModel(self.client.as_chat_model()),
+            allowed_nodes=[],
+            allowed_relationships=[],
+            prompt=GRAPH_TRANSFORMER_PROMPT,
+            strict_mode=True,
+            node_properties=True,
+            relationship_properties=True,
+        )
+        usage_callback = ModelUsageCallbackHandler(
+            role=getattr(self.client, "role", "extraction"),
+            model=getattr(self.client, "llm_model", ""),
+        )
+        rendered = document.render()
+        source = LangChainDocument(
+            page_content=rendered,
+            metadata={"document_id": document.document_id},
+        )
+        try:
+            graph_document = transformer.process_response(
+                source,
+                config={
+                    "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
+                    "run_name": "document-open-schema-graph-extraction",
+                    "metadata": {
+                        "document_id": document.document_id,
+                        "document_type": document.document_type,
+                    },
+                    "callbacks": [usage_callback],
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Document graph extraction failed for %s: %s",
+                document.document_id,
+                exc,
+            )
+            raise RuntimeError(
+                f"Graph extraction failed for document {document.document_id}: {exc}"
+            ) from exc
+
+        result = GraphExtractionResult(document_type=document.document_type)
+        nodes: Dict[tuple[str, str], Any] = {}
+        entity_ids: Dict[tuple[str, str], str] = {}
+        topic_ids: Dict[tuple[str, str], str] = {}
+        topic_parent_links: List[tuple[str, str, str, float, str, Dict[str, Any]]] = []
+
+        for node in graph_document.nodes:
+            properties = {
+                re.sub(r"(?<!^)([A-Z])", r"_\1", str(key)).lower(): value
+                for key, value in (node.properties or {}).items()
+            }
+            node_type = _category(node.type)
+            if node_type.casefold() == "document":
+                result.document_type = str(
+                    properties.get("document_type") or document.document_type
+                ).strip() or "unknown"
+                continue
+            name = " ".join(str(node.id or "").split())
+            evidence = str(properties.get("evidence") or "").strip()
+            source_ref = str(properties.get("source_ref") or "").strip()
+            confidence = _confidence(properties.get("confidence"))
+            block, span = self._source_match(document, source_ref, evidence)
+            if (
+                not name
+                or not _valid_entity_name(name, node_type)
+                or not evidence
+                or not block
+                or span is None
+                or confidence < settings.EXTRACTION_MIN_CONFIDENCE
+            ):
+                result.diagnostics.append(
+                    {
+                        "diagnostic_type": "rejected_node",
+                        "name": name,
+                        "category": node_type,
+                        "evidence": evidence,
+                        "source_ref": source_ref,
+                        "confidence": confidence,
+                    }
+                )
+                continue
+
+            provenance = self._source_provenance(document, block, span)
+            key = (node.id, node_type.casefold())
+            nodes[key] = node
+            if node_type.casefold() == "topic":
+                aliases = self._property(properties, "aliases", [])
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+                result.topics.append(
+                    ExtractedTopic(
+                        name=name,
+                        aliases=[str(value) for value in aliases if str(value).strip()],
+                        evidence=evidence,
+                        confidence=confidence,
+                        source_ref=source_ref,
+                        provenance=provenance,
+                    )
+                )
+                topic_ids[key] = name
+                continue
+
+            aliases = self._property(properties, "aliases", [])
+            attributes = self._property(properties, "attributes", {})
+            if not isinstance(aliases, list):
+                aliases = [str(aliases)] if aliases else []
+            if not isinstance(attributes, dict):
+                attributes = {}
+            reserved = {
+                "evidence", "source_ref", "confidence", "aliases",
+                "attributes", "mentions", "description",
+            }
+            attributes.update(
+                {
+                    str(key): str(value)
+                    for key, value in properties.items()
+                    if key not in reserved and value not in (None, "")
+                }
+            )
+            entity = ExtractedEntity(
+                name=name,
+                category=node_type,
+                description=str(properties.get("description") or ""),
+                aliases=[str(value) for value in aliases if str(value).strip()],
+                attributes={str(key): str(value) for key, value in attributes.items()},
+                evidence=evidence,
+                confidence=confidence,
+                source_ref=source_ref,
+                provenance=provenance,
+            )
+            result.entities.append(entity)
+            entity_ids[key] = name
+
+            mention_rows = self._property(properties, "mentions", [])
+            if not isinstance(mention_rows, list):
+                mention_rows = []
+            if isinstance(mention_rows, list):
+                for mention in mention_rows:
+                    if not isinstance(mention, dict):
+                        continue
+                    mention_evidence = str(mention.get("evidence") or "").strip()
+                    mention_ref = str(mention.get("source_ref") or source_ref)
+                    mention_block, mention_span = self._source_match(
+                        document,
+                        mention_ref,
+                        mention_evidence,
+                    )
+                    mention_confidence = _confidence(mention.get("confidence"))
+                    if (
+                        not mention_block
+                        or mention_span is None
+                        or mention_confidence < settings.EXTRACTION_MIN_CONFIDENCE
+                    ):
+                        continue
+                    result.mentions.append(
+                        ExtractedMention(
+                            text=str(mention.get("text") or "").strip(),
+                            entity_name=name,
+                            entity_category=node_type,
+                            entity_id=name,
+                            mention_type=str(mention.get("mention_type") or "name"),
+                            evidence=mention_evidence,
+                            confidence=mention_confidence,
+                            source_ref=mention_ref,
+                            provenance=self._source_provenance(
+                                document,
+                                mention_block,
+                                mention_span,
+                            ),
+                        )
+                    )
+
+        for relationship in graph_document.relationships:
+            source_key = (relationship.source.id, relationship.source.type.casefold())
+            target_key = (relationship.target.id, relationship.target.type.casefold())
+            properties = {
+                re.sub(r"(?<!^)([A-Z])", r"_\1", str(key)).lower(): value
+                for key, value in (relationship.properties or {}).items()
+            }
+            evidence = str(properties.get("evidence") or "").strip()
+            source_ref = str(properties.get("source_ref") or "").strip()
+            confidence = _confidence(properties.get("confidence"))
+            block, span = self._source_match(document, source_ref, evidence)
+            if (
+                source_key not in nodes
+                or target_key not in nodes
+                or not _relation_type(relationship.type)
+                or not evidence
+                or not block
+                or span is None
+                or confidence < settings.EXTRACTION_MIN_CONFIDENCE
+            ):
+                result.diagnostics.append(
+                    {
+                        "diagnostic_type": "rejected_relationship",
+                        "source": relationship.source.id,
+                        "target": relationship.target.id,
+                        "relation_type": relationship.type,
+                        "evidence": evidence,
+                        "source_ref": source_ref,
+                        "confidence": confidence,
+                    }
+                )
+                continue
+            source_is_topic = source_key in topic_ids
+            target_is_topic = target_key in topic_ids
+            provenance = self._source_provenance(document, block, span)
+            if (
+                source_is_topic
+                and target_is_topic
+                and relationship.type.casefold() in {"parent_of", "has_subtopic", "broader_than"}
+            ):
+                topic_parent_links.append(
+                    (
+                        topic_ids[target_key],
+                        topic_ids[source_key],
+                        source_ref,
+                        confidence,
+                        evidence,
+                        provenance,
+                    )
+                )
+                continue
+            result.relations.append(
+                ExtractedRelation(
+                    source=str(relationship.source.id),
+                    target=str(relationship.target.id),
+                    source_category=_category(relationship.source.type),
+                    target_category=_category(relationship.target.type),
+                    source_entity_id=entity_ids.get(source_key, ""),
+                    target_entity_id=entity_ids.get(target_key, ""),
+                    relation_type=_relation_type(relationship.type),
+                    description=str(properties.get("description") or ""),
+                    evidence=evidence,
+                    confidence=confidence,
+                    source_ref=source_ref,
+                    provenance=provenance,
+                )
+            )
+
+        for child_name, parent_name, source_ref, confidence, evidence, provenance in topic_parent_links:
+            child = next((topic for topic in result.topics if topic.name == child_name), None)
+            if child and parent_name not in child.parent_names:
+                child.parent_names.append(parent_name)
+        return result
 
     def extract(
         self,
@@ -178,24 +677,161 @@ class EntityExtractor:
         chunk_id: str = "",
         known_entities: Optional[List[Dict[str, Any]]] = None,
     ) -> GraphExtractionResult:
-        prompt = EXTRACTION_PROMPT_TEMPLATE.format(
-            document_title=document_title or "Unknown paper",
-            chunk_id=chunk_id or "unknown",
-            known_entities=json.dumps(known_entities or [], ensure_ascii=False),
-            text=text[:settings.GRAPH_EXTRACTION_MAX_CHARS],
-        )
         try:
+            if hasattr(self.client, "as_chat_model"):
+                return self._extract_structured(
+                    text=text,
+                    document_title=document_title,
+                    chunk_id=chunk_id,
+                    known_entities=known_entities,
+                )
+
+            prompt = EXTRACTION_PROMPT_TEMPLATE.format(
+                document_title=document_title or "Unknown paper",
+                chunk_id=chunk_id or "unknown",
+                known_entities=json.dumps(known_entities or [], ensure_ascii=False),
+                text=text[:settings.GRAPH_EXTRACTION_MAX_CHARS],
+            )
             raw_response = self.client.generate(
                 prompt=prompt,
                 system_prompt="Return valid JSON only. Preserve evidence and entity IDs exactly.",
                 temperature=0.0,
             )
-            return self._parse_json_response(raw_response, chunk_id=chunk_id)
+            return self._parse_json_response(
+                raw_response,
+                chunk_id=chunk_id,
+                source_text=text,
+            )
         except Exception as exc:
             logger.error("Entity extraction failed for %s: %s", chunk_id, exc)
             raise RuntimeError(f"Graph extraction failed for {chunk_id}: {exc}") from exc
 
-    def _parse_json_response(self, raw: str, chunk_id: str = "") -> GraphExtractionResult:
+    def _extract_structured(
+        self,
+        *,
+        text: str,
+        document_title: Optional[str],
+        chunk_id: str,
+        known_entities: Optional[List[Dict[str, Any]]],
+    ) -> GraphExtractionResult:
+        prompt = ChatPromptTemplate.from_messages(
+            [("human", EXTRACTION_PROMPT_TEMPLATE)]
+        )
+        model = self.client.as_chat_model().bind(temperature=0.0)
+        json_model = model.bind(response_format={"type": "json_object"})
+        usage_callback = ModelUsageCallbackHandler(
+            role=getattr(self.client, "role", "extraction"),
+            model=getattr(self.client, "llm_model", ""),
+        )
+        parse_result = RunnableLambda(
+            lambda output: self._parse_structured_output(
+                output,
+                chunk_id=chunk_id,
+                source_text=text,
+            )
+        )
+        chain = prompt | json_model | parse_result
+        return chain.invoke(
+            {
+                "document_title": document_title or "Unknown paper",
+                "chunk_id": chunk_id or "unknown",
+                "known_entities": json.dumps(
+                    known_entities or [],
+                    ensure_ascii=False,
+                ),
+                "text": text[:settings.GRAPH_EXTRACTION_MAX_CHARS],
+            },
+            config={
+                "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
+                "run_name": "open-schema-graph-extraction",
+                "metadata": {"chunk_id": chunk_id},
+                "callbacks": [usage_callback],
+            },
+        )
+
+    def _parse_structured_output(
+        self,
+        output: Any,
+        *,
+        chunk_id: str,
+        source_text: str,
+    ) -> GraphExtractionResult:
+        if isinstance(output, AIMessage):
+            tool_calls = output.tool_calls or output.additional_kwargs.get(
+                "tool_calls", []
+            )
+            if tool_calls:
+                tool_call = tool_calls[0]
+                payload = tool_call.get("args")
+                if payload is None:
+                    payload = tool_call.get("function", {}).get("arguments")
+                if isinstance(payload, str):
+                    payload = self._decode_structured_json(payload)
+            else:
+                content = output.content
+                if isinstance(content, list):
+                    content = "\n".join(
+                        block["text"]
+                        for block in content
+                        if isinstance(block, dict)
+                        and isinstance(block.get("text"), str)
+                    )
+                payload = self._decode_structured_json(content)
+        elif isinstance(output, BaseModel):
+            payload = output.model_dump()
+        elif isinstance(output, dict):
+            payload = output.get("parsed", output)
+            if isinstance(payload, BaseModel):
+                payload = payload.model_dump()
+        elif isinstance(output, str):
+            payload = self._decode_structured_json(output)
+        else:
+            raise TypeError(
+                "Structured graph extraction returned unsupported output type "
+                f"{type(output).__name__}"
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("Structured graph extraction did not return a JSON object")
+        expected_fields = {"entities", "mentions", "relations", "topics"}
+        if not expected_fields.intersection(payload):
+            raise ValueError(
+                "Structured graph extraction returned an object without graph fields"
+            )
+        try:
+            payload = GraphExtractionOutput.model_validate(payload).model_dump()
+        except ValidationError as exc:
+            raise ValueError(
+                "Structured graph extraction did not match the expected schema"
+            ) from exc
+        return self._parse_json_response(
+            json.dumps(payload, ensure_ascii=False),
+            chunk_id=chunk_id,
+            source_text=source_text,
+        )
+
+    @staticmethod
+    def _decode_structured_json(raw: Any) -> Dict[str, Any]:
+        if not isinstance(raw, str):
+            raise TypeError("Structured graph extraction response was not text")
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not json_match:
+            raise ValueError("Structured graph extraction response contained no JSON")
+        try:
+            payload = json.loads(json_match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Structured graph extraction response contained invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Structured graph extraction response was not an object")
+        return payload
+
+    def _parse_json_response(
+        self,
+        raw: str,
+        chunk_id: str = "",
+        source_text: Optional[str] = None,
+    ) -> GraphExtractionResult:
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not json_match:
             return GraphExtractionResult()
@@ -210,7 +846,13 @@ class EntityExtractor:
                 continue
             name = str(row.get("name") or "").strip()
             category = _category(row.get("category"))
-            if not _valid_entity_name(name, category):
+            evidence = str(row.get("evidence") or "").strip()
+            confidence = _confidence(row.get("confidence"))
+            if (
+                not _valid_entity_name(name, category)
+                or not _grounded(evidence, source_text)
+                or confidence < settings.EXTRACTION_MIN_CONFIDENCE
+            ):
                 logger.info("Rejected low-quality entity candidate: %r", name)
                 continue
             aliases = [str(alias).strip() for alias in row.get("aliases", []) if str(alias).strip()]
@@ -226,6 +868,9 @@ class EntityExtractor:
                 description=str(row.get("description") or "").strip(),
                 aliases=aliases,
                 attributes=attributes,
+                evidence=evidence,
+                confidence=confidence,
+                source_ref=str(row.get("source_ref") or "").strip(),
             ))
 
         mentions: List[ExtractedMention] = []
@@ -233,7 +878,8 @@ class EntityExtractor:
             if not isinstance(row, dict):
                 continue
             mention_text = str(row.get("text") or "").strip()
-            if not mention_text:
+            evidence = str(row.get("evidence") or "").strip()
+            if not mention_text or not _grounded(evidence, source_text):
                 continue
             mentions.append(ExtractedMention(
                 text=mention_text,
@@ -241,9 +887,54 @@ class EntityExtractor:
                 entity_name=str(row.get("entity_name") or "").strip(),
                 entity_category=_category(row.get("entity_category")),
                 mention_type=str(row.get("mention_type") or "name").strip().casefold(),
-                evidence=str(row.get("evidence") or "").strip(),
+                attributes={
+                    str(key): str(value)
+                    for key, value in (row.get("attributes") or {}).items()
+                    if value not in (None, "")
+                } if isinstance(row.get("attributes") or {}, dict) else {},
+                evidence=evidence,
                 confidence=_confidence(row.get("confidence")),
                 chunk_id=chunk_id,
+                source_ref=str(row.get("source_ref") or "").strip(),
+            ))
+
+        topics: List[ExtractedTopic] = []
+        for row in data.get("topics", []):
+            if not isinstance(row, dict):
+                continue
+            name = " ".join(str(row.get("name") or "").split())
+            evidence = str(row.get("evidence") or "").strip()
+            if (
+                len(name) < 3
+                or len(name) > 120
+                or not _grounded(evidence, source_text)
+                or _confidence(row.get("confidence")) < settings.TOPIC_MIN_CONFIDENCE
+                or re.search(r"[.!?؟。]\s*$", name)
+            ):
+                continue
+            raw_parents = row.get("parent_names") or []
+            raw_aliases = row.get("aliases") or []
+            if not isinstance(raw_parents, list):
+                raw_parents = []
+            if not isinstance(raw_aliases, list):
+                raw_aliases = []
+            parent_names = [
+                " ".join(str(value).split())
+                for value in raw_parents
+                if str(value).strip()
+            ]
+            aliases = [
+                " ".join(str(value).split())
+                for value in raw_aliases
+                if str(value).strip()
+            ]
+            topics.append(ExtractedTopic(
+                name=name,
+                parent_names=parent_names,
+                aliases=aliases,
+                evidence=evidence,
+                confidence=_confidence(row.get("confidence")),
+                source_ref=str(row.get("source_ref") or "").strip(),
             ))
 
         relations: List[ExtractedRelation] = []
@@ -252,11 +943,16 @@ class EntityExtractor:
                 continue
             source = str(row.get("source") or "").strip()
             target = str(row.get("target") or "").strip()
-            relation_type = str(row.get("relation_type") or "").strip().upper()
-            if not source or not target or source == target:
-                continue
-            if relation_type not in ALLOWED_RELATION_TYPES:
-                logger.warning("Rejected unsupported relation type: %s", relation_type)
+            relation_type = _relation_type(row.get("relation_type"))
+            evidence = str(row.get("evidence") or "").strip()
+            if (
+                not source
+                or not target
+                or source == target
+                or not relation_type
+                or not _grounded(evidence, source_text)
+                or _confidence(row.get("confidence")) < settings.EXTRACTION_MIN_CONFIDENCE
+            ):
                 continue
             relations.append(ExtractedRelation(
                 source=source,
@@ -267,12 +963,19 @@ class EntityExtractor:
                 target_entity_id=str(row.get("target_entity_id") or "").strip(),
                 relation_type=relation_type,
                 description=str(row.get("description") or "").strip(),
-                evidence=str(row.get("evidence") or "").strip(),
+                evidence=evidence,
                 confidence=_confidence(row.get("confidence")),
                 chunk_id=chunk_id,
+                source_ref=str(row.get("source_ref") or "").strip(),
             ))
 
-        return GraphExtractionResult(entities=entities, mentions=mentions, relations=relations)
+        return GraphExtractionResult(
+            entities=entities,
+            mentions=mentions,
+            relations=relations,
+            topics=topics,
+            document_type=str(data.get("document_type") or "unknown"),
+        )
 
     def _rule_based_fallback(self, text: str, chunk_id: str = "") -> GraphExtractionResult:
         """Fail closed: an unavailable model must not pollute the graph."""

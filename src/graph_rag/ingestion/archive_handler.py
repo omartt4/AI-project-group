@@ -19,7 +19,11 @@ from typing import List, Union
 from graph_rag.config import settings
 
 # Supported document extensions to extract from archives
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".pptx", ".txt", ".md",
+    ".csv", ".xlsx", ".json", ".parquet",
+    ".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
+}
 
 
 @dataclass

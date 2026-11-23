@@ -9,9 +9,8 @@ from typing import Any, Dict, List, Optional
 from neo4j import Driver, GraphDatabase
 
 from graph_rag.config import settings
-from graph_rag.graph.entity_extractor import ALLOWED_RELATION_TYPES, GraphExtractionResult
+from graph_rag.graph.entity_extractor import GraphExtractionResult
 from graph_rag.graph.topic_taxonomy import (
-    SEED_TOPICS,
     TopicAssignment,
     normalize_topic,
     topic_taxonomy,
@@ -19,27 +18,8 @@ from graph_rag.graph.topic_taxonomy import (
 
 logger = logging.getLogger(__name__)
 
-
-def _is_byline_only_entity(entity: Any) -> bool:
-    """Reject paper-author metadata that is not a body-level graph fact."""
-    description = str(entity.description or "").casefold()
-    role = str(entity.attributes.get("role", "") or "").casefold()
-    if entity.category == "Person":
-        return (
-            "author of the paper" in description
-            or "paper author" in description
-            or role in {"author", "co-author", "coauthor"}
-        )
-    if entity.category == "Organization":
-        return (
-            description.startswith("affiliation of ")
-            or "author affiliation" in description
-        )
-    return False
-
-
 class GraphBuilder:
-    """Build the compact Paper, Topic, Method, Dataset, Person and Organization graph."""
+    """Persist generic documents, canonical entities, topics, and relationships."""
 
     def __init__(
         self,
@@ -94,7 +74,7 @@ class GraphBuilder:
         session: Any,
         assignment: TopicAssignment,
         topic_uid: str,
-        paper_uid: Optional[str] = None,
+        document_uid: Optional[str] = None,
     ) -> None:
         """Apply hierarchy labels and links to one canonical topic entity."""
         if assignment.level == "top_level":
@@ -104,6 +84,11 @@ class GraphBuilder:
                 SET t:Topic:TopLevelTopic,
                     t.key = $key,
                     t.name = $name,
+                    t.aliases = reduce(
+                        acc = coalesce(t.aliases, []),
+                        alias IN $aliases |
+                        CASE WHEN alias IN acc THEN acc ELSE acc + alias END
+                    ),
                     t.entity_id = $entity_id,
                     t.category = 'Topic',
                     t.level = 'top_level',
@@ -117,6 +102,7 @@ class GraphBuilder:
                 topic_uid=topic_uid,
                 key=assignment.key,
                 name=assignment.name,
+                aliases=list(assignment.aliases),
                 entity_id=f"topic:{assignment.key}",
                 status=assignment.status,
                 topic_source=assignment.source,
@@ -135,6 +121,11 @@ class GraphBuilder:
                 SET s:Topic:Subtopic,
                     s.key = $key,
                     s.name = $name,
+                    s.aliases = reduce(
+                        acc = coalesce(s.aliases, []),
+                        alias IN $aliases |
+                        CASE WHEN alias IN acc THEN acc ELSE acc + alias END
+                    ),
                     s.entity_id = $entity_id,
                     s.category = 'Topic',
                     s.level = 'subtopic',
@@ -165,6 +156,7 @@ class GraphBuilder:
                 topic_uid=topic_uid,
                 key=assignment.key,
                 name=assignment.name,
+                aliases=list(assignment.aliases),
                 entity_id=f"topic:{assignment.key}",
                 status=assignment.status,
                 topic_source=assignment.source,
@@ -186,16 +178,19 @@ class GraphBuilder:
                 schema_version=settings.GRAPH_SCHEMA_VERSION,
             ).consume()
 
-        if paper_uid:
+        if document_uid:
             session.run(
                 """
                 MATCH (t:Topic {uid: $topic_uid})
-                MATCH (p:Paper {uid: $paper_uid})
-                MERGE (t)-[r:HAS_PAPER]->(p)
-                SET r.dataset_id = $dataset_id
+                MATCH (d:Document {uid: $document_uid})
+                MERGE (t)-[r:HAS_DOCUMENT]->(d)
+                SET r.dataset_id = $dataset_id,
+                    r.source = $topic_source,
+                    r.confidence = $confidence,
+                    r.evidence = $evidence
                 """,
                 topic_uid=topic_uid,
-                paper_uid=paper_uid,
+                document_uid=document_uid,
                 dataset_id=self.dataset_id,
             ).consume()
 
@@ -216,46 +211,6 @@ class GraphBuilder:
             ))
             for row in rows:
                 assignment = topic_taxonomy.identity_for_entity(row["name"])
-                paper_parents = tuple(
-                    record["name"]
-                    for record in session.run(
-                        """
-                        MATCH (t:Entity {uid: $topic_uid})
-                        OPTIONAL MATCH (p1:Paper)-[:MENTIONS]->(t)
-                        WITH t, collect(DISTINCT p1) AS mentioned_by
-                        OPTIONAL MATCH (t)-[:HAS_PAPER]->(p2:Paper)
-                        WITH t, mentioned_by,
-                             collect(DISTINCT p2) AS taxonomy_papers
-                        WITH t, [p IN mentioned_by + taxonomy_papers
-                                WHERE p IS NOT NULL] AS papers
-                        UNWIND papers AS paper
-                        MATCH (parent:TopLevelTopic)-[:HAS_PAPER]->(paper)
-                        WHERE parent.name IN $seed_names AND parent <> t
-                        RETURN DISTINCT parent.name AS name
-                        ORDER BY name
-                        """,
-                        topic_uid=row["uid"],
-                        seed_names=list(SEED_TOPICS),
-                    )
-                )
-                if (
-                    assignment.level == "top_level"
-                    and assignment.name not in SEED_TOPICS
-                    and paper_parents
-                ):
-                    assignment = TopicAssignment(
-                        name=row["name"],
-                        key=normalize_topic(row["name"]).replace(" ", "-"),
-                        status="candidate",
-                        source="paper_context",
-                        confidence=0.7,
-                        level="subtopic",
-                        parent_names=paper_parents,
-                        parent_keys=tuple(
-                            normalize_topic(parent).replace(" ", "-")
-                            for parent in paper_parents
-                        ),
-                    )
                 self._apply_topic_assignment(
                     session,
                     assignment,
@@ -263,8 +218,10 @@ class GraphBuilder:
                 )
                 session.run(
                     """
-                    MATCH (p:Paper)-[:MENTIONS]->(t:Topic {uid: $topic_uid})
-                    MERGE (t)-[r:HAS_PAPER]->(p)
+                    MATCH (d)-[:MENTIONS]->(t:Topic {uid: $topic_uid})
+                    WHERE d:Document OR d:Paper
+                    SET d:Document
+                    MERGE (t)-[r:HAS_DOCUMENT]->(d)
                     SET r.dataset_id = $dataset_id
                     """,
                     topic_uid=row["uid"],
@@ -278,8 +235,7 @@ class GraphBuilder:
         if not driver:
             return
         queries = [
-            "DROP CONSTRAINT chunk_uid_unique IF EXISTS",
-            "DROP CONSTRAINT mention_uid_unique IF EXISTS",
+            "CREATE CONSTRAINT document_uid_unique IF NOT EXISTS FOR (d:Document) REQUIRE d.uid IS UNIQUE",
             "CREATE CONSTRAINT paper_uid_unique IF NOT EXISTS FOR (p:Paper) REQUIRE p.uid IS UNIQUE",
             "CREATE CONSTRAINT topic_uid_unique IF NOT EXISTS FOR (t:Topic) REQUIRE t.uid IS UNIQUE",
             "CREATE CONSTRAINT entity_uid_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.uid IS UNIQUE",
@@ -288,14 +244,6 @@ class GraphBuilder:
             with driver.session() as session:
                 for query in queries:
                     session.run(query).consume()
-                session.run(
-                    """
-                    MATCH (n {dataset_id: $dataset_id})
-                    WHERE n:Chunk OR n:Mention
-                    DETACH DELETE n
-                    """,
-                    dataset_id=self.dataset_id,
-                ).consume()
         except Exception as exc:
             self._mark_offline(exc)
 
@@ -303,49 +251,109 @@ class GraphBuilder:
         self,
         document_name: str,
         title: str,
+        document_id: str = "",
+        document_type: str = "unknown",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Create a Paper and its top-level Topic/Subtopic hierarchy.
-
-        The method name is kept for compatibility with the existing pipeline.
-        """
+        """Create a generic Document node and its extracted topic hierarchy."""
         driver = self.get_driver()
         if not driver:
             return False
         meta = metadata or {}
-        assignments = topic_taxonomy.assign(
-            str(meta.get("topic") or ""),
-            source=str(meta.get("topic_source") or "metadata"),
-        )
-        paper_uid = self._uid(document_name)
+        document_uid = self._uid(document_name)
         try:
             with driver.session() as session:
+                existing_topics = [
+                    dict(row)
+                    for row in session.run(
+                        """
+                        MATCH (t:Topic {dataset_id: $dataset_id})
+                        OPTIONAL MATCH (parent:TopLevelTopic)-[r:HAS_SUBTOPIC]->(t)
+                        WHERE r.document_id IS NULL OR r.document_id <> $document_id
+                        RETURN t.name AS name, coalesce(t.aliases, []) AS aliases,
+                               t.key AS key,
+                               t.level AS level, t.status AS status,
+                               collect(DISTINCT parent.name) AS parent_names
+                        """,
+                        dataset_id=self.dataset_id,
+                        document_id=document_id or document_name,
+                    )
+                ]
+                assignments = topic_taxonomy.assign(
+                    str(meta.get("topic") or ""),
+                    source=str(meta.get("topic_source") or "metadata"),
+                    proposals=meta.get("topic_proposals") or [],
+                    existing_topics=existing_topics,
+                    entity_names=meta.get("entity_names") or [],
+                    diagnostics=meta.get("diagnostics"),
+                )
                 session.run(
                     """
-                    MERGE (p:Paper {uid: $uid})
-                    ON CREATE SET p.created_at = datetime()
-                    SET p.paper_id = $paper_id,
-                        p.title = $title,
-                        p.source = $source,
-                        p.dataset_id = $dataset_id,
-                        p.schema_version = $schema_version
+                    MATCH ()-[r:HAS_SUBTOPIC {document_id: $document_id}]->()
+                    DELETE r
                     """,
-                    uid=paper_uid,
-                    paper_id=document_name,
-                    title=title,
-                    source=meta.get("source", "upload"),
-                    dataset_id=self.dataset_id,
-                    schema_version=settings.GRAPH_SCHEMA_VERSION,
+                    document_id=document_id or document_name,
                 ).consume()
+                legacy = session.run(
+                    """
+                    MATCH (legacy:Paper {uid: $uid})
+                    SET legacy:Document
+                    RETURN legacy
+                    """,
+                    uid=document_uid,
+                ).single()
+                if legacy:
+                    session.run(
+                        """
+                        MATCH (d:Document {uid: $uid})
+                        SET d.document_id = $document_id,
+                            d.document_name = $document_name,
+                            d.document_type = $document_type,
+                            d.title = $title,
+                            d.source = $source,
+                            d.dataset_id = $dataset_id,
+                            d.schema_version = $schema_version
+                        """,
+                        uid=document_uid,
+                        document_id=document_id or document_name,
+                        document_name=document_name,
+                        document_type=document_type or "unknown",
+                        title=title,
+                        source=meta.get("source", "upload"),
+                        dataset_id=self.dataset_id,
+                        schema_version=settings.GRAPH_SCHEMA_VERSION,
+                    ).consume()
+                else:
+                    session.run(
+                        """
+                        MERGE (d:Document {uid: $uid})
+                        ON CREATE SET d.created_at = datetime()
+                        SET d.document_id = $document_id,
+                            d.document_name = $document_name,
+                            d.document_type = $document_type,
+                            d.title = $title,
+                            d.source = $source,
+                            d.dataset_id = $dataset_id,
+                            d.schema_version = $schema_version
+                        """,
+                        uid=document_uid,
+                        document_id=document_id or document_name,
+                        document_name=document_name,
+                        document_type=document_type or "unknown",
+                        title=title,
+                        source=meta.get("source", "upload"),
+                        dataset_id=self.dataset_id,
+                        schema_version=settings.GRAPH_SCHEMA_VERSION,
+                    ).consume()
 
-                # Rebuilding a paper must replace stale taxonomy links without
+                # Rebuilding a document must replace stale taxonomy links without
                 # deleting shared topic nodes or any evidence graph data.
                 session.run(
                     """
-                    MATCH (t:Topic)-[r:HAS_PAPER]->(p:Paper {uid: $paper_uid})
+                    MATCH (t:Topic)-[r:HAS_DOCUMENT]->(d:Document {uid: $document_uid})
                     DELETE r
                     """,
-                    paper_uid=paper_uid,
+                    document_uid=document_uid,
                 ).consume()
 
                 top_level_topics = [
@@ -358,12 +366,17 @@ class GraphBuilder:
                 for topic in top_level_topics:
                     session.run(
                         """
-                        MATCH (p:Paper {uid: $paper_uid})
+                        MATCH (d:Document {uid: $document_uid})
                         MERGE (t:Entity {uid: $topic_uid})
                         ON CREATE SET t.created_at = datetime()
                         SET t:Topic:TopLevelTopic,
                             t.key = $key,
                             t.name = $name,
+                            t.aliases = reduce(
+                                acc = coalesce(t.aliases, []),
+                                alias IN $aliases |
+                                CASE WHEN alias IN acc THEN acc ELSE acc + alias END
+                            ),
                             t.entity_id = $entity_id,
                             t.category = 'Topic',
                             t.level = 'top_level',
@@ -373,17 +386,24 @@ class GraphBuilder:
                             t.dataset_id = $dataset_id,
                             t.schema_version = $schema_version
                         REMOVE t:Subtopic
-                        MERGE (t)-[r:HAS_PAPER]->(p)
-                        SET r.dataset_id = $dataset_id
+                        MERGE (t)-[r:HAS_DOCUMENT]->(d)
+                        SET r.dataset_id = $dataset_id,
+                            r.source = $topic_source,
+                            r.confidence = $confidence,
+                            r.evidence = $evidence,
+                            r.document_id = $document_id
                         """,
-                        paper_uid=paper_uid,
+                        document_uid=document_uid,
+                        document_id=document_id or document_name,
                         topic_uid=self._uid(f"topic:{topic.key}"),
                         key=topic.key,
                         name=topic.name,
+                        aliases=list(topic.aliases),
                         entity_id=f"topic:{topic.key}",
                         status=topic.status,
                         topic_source=topic.source,
                         confidence=topic.confidence,
+                        evidence=topic.evidence,
                         dataset_id=self.dataset_id,
                         schema_version=settings.GRAPH_SCHEMA_VERSION,
                     ).consume()
@@ -391,12 +411,17 @@ class GraphBuilder:
                 for topic in subtopics:
                     session.run(
                         """
-                        MATCH (p:Paper {uid: $paper_uid})
+                        MATCH (d:Document {uid: $document_uid})
                         MERGE (s:Entity {uid: $topic_uid})
                         ON CREATE SET s.created_at = datetime()
                         SET s:Topic:Subtopic,
                             s.key = $key,
                             s.name = $name,
+                            s.aliases = reduce(
+                                acc = coalesce(s.aliases, []),
+                                alias IN $aliases |
+                                CASE WHEN alias IN acc THEN acc ELSE acc + alias END
+                            ),
                             s.entity_id = $entity_id,
                             s.category = 'Topic',
                             s.level = 'subtopic',
@@ -406,22 +431,33 @@ class GraphBuilder:
                             s.dataset_id = $dataset_id,
                             s.schema_version = $schema_version
                         REMOVE s:TopLevelTopic
-                        MERGE (s)-[paper_rel:HAS_PAPER]->(p)
-                        SET paper_rel.dataset_id = $dataset_id
+                        MERGE (s)-[paper_rel:HAS_DOCUMENT]->(d)
+                        SET paper_rel.dataset_id = $dataset_id,
+                            paper_rel.source = $topic_source,
+                            paper_rel.confidence = $confidence,
+                            paper_rel.evidence = $evidence,
+                            paper_rel.document_id = $document_id
                         WITH s
                         UNWIND $parent_uids AS parent_uid
                         MATCH (parent:TopLevelTopic {uid: parent_uid})
-                        MERGE (parent)-[taxonomy_rel:HAS_SUBTOPIC]->(s)
-                        SET taxonomy_rel.dataset_id = $dataset_id
+                        MERGE (parent)-[taxonomy_rel:HAS_SUBTOPIC
+                            {document_id: $document_id}]->(s)
+                        SET taxonomy_rel.dataset_id = $dataset_id,
+                            taxonomy_rel.source = $topic_source,
+                            taxonomy_rel.confidence = $confidence,
+                            taxonomy_rel.evidence = $evidence
                         """,
-                        paper_uid=paper_uid,
+                        document_uid=document_uid,
+                        document_id=document_id or document_name,
                         topic_uid=self._uid(f"topic:{topic.key}"),
                         key=topic.key,
                         name=topic.name,
+                        aliases=list(topic.aliases),
                         entity_id=f"topic:{topic.key}",
                         status=topic.status,
                         topic_source=topic.source,
                         confidence=topic.confidence,
+                        evidence=topic.evidence,
                         parent_uids=[
                             self._uid(f"topic:{parent_key}")
                             for parent_key in topic.parent_keys
@@ -434,70 +470,79 @@ class GraphBuilder:
             self._mark_offline(exc)
             return False
 
-    def clear_paper_evidence(self, document_name: str) -> None:
-        """Remove stale graph evidence for one paper before a graph-only rebuild.
-
-        Shared entities and controlled top-level topics survive when another paper
-        still references them. Vector embeddings and local metadata are untouched.
-        """
+    def clear_document_evidence(
+        self,
+        document_name: str,
+        document_id: str = "",
+    ) -> None:
+        """Remove stale graph evidence while preserving entities shared by other documents."""
         driver = self.get_driver()
         if not driver:
             return
-        paper_uid = self._uid(document_name)
+        document_uid = self._uid(document_name)
+        stable_document_id = document_id or document_name
         try:
             with driver.session() as session:
                 session.run(
                     """
-                    MATCH ()-[r {paper_id: $paper_id}]->()
+                    MATCH ()-[r]->()
+                    WHERE r.document_id = $document_id
+                       OR r.document_name = $document_name
+                       OR r.paper_id = $document_name
                     DELETE r
                     """,
-                    paper_id=document_name,
+                    document_id=stable_document_id,
+                    document_name=document_name,
                 ).consume()
                 session.run(
                     """
-                    MATCH (p:Paper {uid: $paper_uid})-[r]->(:Entity)
-                    WHERE type(r) IN ['MENTIONS', 'CONTAINS_ENTITY', 'USES_METHOD', 'EVALUATES_ON']
+                    MATCH (d:Document {uid: $document_uid})-[r]->(:Entity)
                     DELETE r
                     """,
-                    paper_uid=paper_uid,
+                    document_uid=document_uid,
                 ).consume()
                 session.run(
                     """
-                    MATCH (t:Topic)-[r:HAS_PAPER]->(p:Paper {uid: $paper_uid})
+                    MATCH (t:Topic)-[r:HAS_DOCUMENT]->(d:Document {uid: $document_uid})
                     DELETE r
                     """,
-                    paper_uid=paper_uid,
+                    document_uid=document_uid,
                 ).consume()
                 session.run(
                     """
                     MATCH (e:Entity {dataset_id: $dataset_id})
                     WHERE NOT e:Topic
-                      AND NOT EXISTS {
-                          MATCH (:Paper)-[r]->(e)
-                          WHERE type(r) IN ['MENTIONS', 'CONTAINS_ENTITY', 'USES_METHOD', 'EVALUATES_ON']
-                      }
+                      AND NOT EXISTS { MATCH (:Document)-[]->(e) }
+                      AND NOT EXISTS { MATCH (e)-[]->(:Document) }
+                      AND NOT EXISTS { MATCH ()-[r]->(e) WHERE r.document_id IS NOT NULL
+                                       AND r.document_id <> $document_id }
+                      AND NOT EXISTS { MATCH (e)-[r]->() WHERE r.document_id IS NOT NULL
+                                       AND r.document_id <> $document_id }
                     DETACH DELETE e
                     """,
                     dataset_id=self.dataset_id,
+                    document_id=stable_document_id,
                 ).consume()
                 session.run(
                     """
                     MATCH (t:Topic {dataset_id: $dataset_id})
-                    WHERE NOT (t)-[:HAS_PAPER]->(:Paper)
-                      AND NOT t.name IN $seed_topics
+                    WHERE NOT (t)-[:HAS_DOCUMENT]->(:Document)
                     DETACH DELETE t
                     """,
                     dataset_id=self.dataset_id,
-                    seed_topics=list(SEED_TOPICS),
                 ).consume()
         except Exception as exc:
             self._mark_offline(exc)
 
-    def delete_document(self, document_name: str) -> bool:
-        """Delete one paper and only the graph evidence that depends on it."""
+    def clear_paper_evidence(self, document_name: str) -> None:
+        """Compatibility wrapper for graph rebuild callers using the former API."""
+        self.clear_document_evidence(document_name)
+
+    def delete_document(self, document_name: str, document_id: str = "") -> bool:
+        """Delete one generic document and only evidence that depends on it."""
         if not self.get_driver():
             return False
-        self.clear_paper_evidence(document_name)
+        self.clear_document_evidence(document_name, document_id=document_id)
         driver = self.get_driver()
         if not driver:
             return False
@@ -505,10 +550,10 @@ class GraphBuilder:
             with driver.session() as session:
                 session.run(
                     """
-                    MATCH (p:Paper {uid: $paper_uid, dataset_id: $dataset_id})
-                    DETACH DELETE p
+                    MATCH (d:Document {uid: $document_uid, dataset_id: $dataset_id})
+                    DETACH DELETE d
                     """,
-                    paper_uid=self._uid(document_name),
+                    document_uid=self._uid(document_name),
                     dataset_id=self.dataset_id,
                 ).consume()
             return True
@@ -520,12 +565,14 @@ class GraphBuilder:
         self,
         document_name: str,
         result: GraphExtractionResult,
+        document_id: str = "",
     ) -> bool:
-        """Persist canonical entities, mentions, and evidence-backed relations."""
+        """Persist canonical entities and evidence-backed semantic relationships."""
         driver = self.get_driver()
         if not driver:
             return False
-        paper_uid = self._uid(document_name)
+        document_uid = self._uid(document_name)
+        stable_document_id = document_id or document_name
         try:
             with driver.session() as session:
                 persisted_uids: Dict[str, str] = {}
@@ -533,34 +580,10 @@ class GraphBuilder:
                     if not entity.entity_id:
                         logger.warning("Skipping entity without a resolved ID: %s", entity.name)
                         continue
-                    if _is_byline_only_entity(entity):
-                        logger.info("Skipping byline-only %s: %s", entity.category, entity.name)
-                        continue
                     entity_uid = self._uid(entity.entity_id)
-                    matching_topic = None
-                    if entity.category == "Method":
-                        matching_topic = session.run(
-                            """
-                            MATCH (t:Topic {dataset_id: $dataset_id})
-                            WHERE toLower(t.name) = toLower($name)
-                            RETURN t.uid AS uid
-                            LIMIT 1
-                            """,
-                            dataset_id=self.dataset_id,
-                            name=entity.name,
-                        ).single()
-                    if matching_topic:
-                        entity_uid = matching_topic["uid"]
-                    else:
-                        entity_label = {
-                            "Method": "Method",
-                            "Dataset": "Dataset",
-                            "Person": "Person",
-                            "Organization": "Organization",
-                        }[entity.category]
-                        session.run(
-                            f"""
-                        MERGE (e:Entity {{uid: $uid}})
+                    session.run(
+                        """
+                        MERGE (e:Entity {uid: $uid})
                         ON CREATE SET e.created_at = datetime()
                         SET e.entity_id = $entity_id,
                             e.name = $name,
@@ -570,58 +593,61 @@ class GraphBuilder:
                             e.attributes_json = $attributes_json,
                             e.role = $role,
                             e.organization = $organization,
+                            e.evidence = $evidence,
+                            e.confidence = $confidence,
+                            e.provenance_json = $provenance_json,
                             e.dataset_id = $dataset_id,
                             e.schema_version = $schema_version
-                        REMOVE e:Method:Dataset:Person:Organization
-                        SET e:Entity:{entity_label}
-                            """,
-                            uid=entity_uid,
-                            entity_id=entity.entity_id,
-                            name=entity.name,
-                            category=entity.category,
-                            description=entity.description,
-                            aliases=entity.aliases,
-                            attributes_json=json.dumps(entity.attributes, ensure_ascii=False),
-                            role=entity.attributes.get("role", ""),
-                            organization=entity.attributes.get("organization", ""),
-                            dataset_id=self.dataset_id,
-                            schema_version=settings.GRAPH_SCHEMA_VERSION,
-                        ).consume()
+                        """,
+                        uid=entity_uid,
+                        entity_id=entity.entity_id,
+                        name=entity.name,
+                        category=entity.category,
+                        description=entity.description,
+                        aliases=entity.aliases,
+                        attributes_json=json.dumps(entity.attributes, ensure_ascii=False),
+                        role=entity.attributes.get("role", ""),
+                        organization=entity.attributes.get("organization", ""),
+                        evidence=getattr(entity, "evidence", ""),
+                        confidence=getattr(entity, "confidence", 0.0),
+                        provenance_json=json.dumps(
+                            getattr(entity, "provenance", {}) or {},
+                            ensure_ascii=False,
+                        ),
+                        dataset_id=self.dataset_id,
+                        schema_version=settings.GRAPH_SCHEMA_VERSION,
+                    ).consume()
                     persisted_uids[entity.entity_id] = entity_uid
-                    if entity.category in {"Person", "Organization"}:
-                        session.run(
-                            """
-                            MATCH (p:Paper {uid: $paper_uid})
-                            MATCH (e:Entity {uid: $entity_uid})
-                            MERGE (p)-[r:CONTAINS_ENTITY]->(e)
-                            SET r.dataset_id = $dataset_id,
-                                r.source = 'extraction_contract'
-                            """,
-                            paper_uid=paper_uid,
-                            entity_uid=entity_uid,
-                            dataset_id=self.dataset_id,
-                        ).consume()
-                    paper_relation = {
-                        "Method": "USES_METHOD",
-                        "Dataset": "EVALUATES_ON",
-                    }.get(entity.category)
-                    if paper_relation:
-                        session.run(
-                            f"""
-                            MATCH (p:Paper {{uid: $paper_uid}})
-                            MATCH (e:Entity {{uid: $entity_uid}})
-                            MERGE (p)-[r:{paper_relation}]->(e)
-                            SET r.dataset_id = $dataset_id,
-                                r.source = 'extraction_contract'
-                            """,
-                            paper_uid=paper_uid,
-                            entity_uid=entity_uid,
-                            dataset_id=self.dataset_id,
-                        ).consume()
+                    session.run(
+                        """
+                        MATCH (d:Document {uid: $document_uid})
+                        MATCH (e:Entity {uid: $entity_uid})
+                        MERGE (d)-[r:HAS_ENTITY_EVIDENCE {
+                            document_id: $document_id,
+                            entity_id: $entity_id
+                        }]->(e)
+                        SET r.evidence = $evidence,
+                            r.confidence = $confidence,
+                            r.provenance_json = $provenance_json,
+                            r.extraction_model = $extraction_model,
+                            r.extraction_version = $extraction_version,
+                            r.dataset_id = $dataset_id
+                        """,
+                        document_uid=document_uid,
+                        entity_uid=entity_uid,
+                        document_id=stable_document_id,
+                        entity_id=entity.entity_id,
+                        evidence=getattr(entity, "evidence", ""),
+                        confidence=getattr(entity, "confidence", 0.0),
+                        provenance_json=json.dumps(
+                            getattr(entity, "provenance", {}) or {},
+                            ensure_ascii=False,
+                        ),
+                        extraction_model=settings.EXTRACTION_MODEL,
+                        extraction_version=settings.EXTRACTION_VERSION,
+                        dataset_id=self.dataset_id,
+                    ).consume()
                 for relation in result.relations:
-                    if relation.relation_type not in ALLOWED_RELATION_TYPES:
-                        logger.warning("Rejected unsafe relation type: %s", relation.relation_type)
-                        continue
                     if not relation.source_entity_id or not relation.target_entity_id:
                         logger.info(
                             "Skipping unresolved relation: %s -> %s",
@@ -633,35 +659,226 @@ class GraphBuilder:
                     target_uid = persisted_uids.get(relation.target_entity_id)
                     if not source_uid or not target_uid:
                         continue
-                    query = f"""
-                    MATCH (s:Entity {{uid: $source_uid}})
-                    MATCH (t:Entity {{uid: $target_uid}})
-                    MERGE (s)-[r:{relation.relation_type} {{paper_id: $paper_id}}]->(t)
+                    query = """
+                    MATCH (s:Entity {uid: $source_uid})
+                    MATCH (t:Entity {uid: $target_uid})
+                    MERGE (s)-[r:RELATION {document_id: $document_id,
+                                           relation_type: $relation_type}]->(t)
                     SET r.description = $description,
                         r.evidence = $evidence,
                         r.confidence = CASE
                             WHEN r.confidence IS NULL OR $confidence > r.confidence
                             THEN $confidence ELSE r.confidence END,
-                        r.chunk_id = $chunk_id,
+                        r.source_ref = $source_ref,
+                        r.provenance_json = $provenance_json,
+                        r.document_name = $document_name,
                         r.dataset_id = $dataset_id,
-                        r.extraction_version = $extraction_version
+                        r.extraction_version = $extraction_version,
+                        r.extraction_model = $extraction_model
                     """
                     session.run(
                         query,
                         source_uid=source_uid,
                         target_uid=target_uid,
+                        relation_type=relation.relation_type,
                         description=relation.description,
                         evidence=relation.evidence,
                         confidence=relation.confidence,
-                        paper_id=document_name,
-                        chunk_id=relation.chunk_id,
+                        document_id=stable_document_id,
+                        document_name=document_name,
+                        source_ref=getattr(relation, "source_ref", ""),
+                        provenance_json=json.dumps(
+                            getattr(relation, "provenance", {}) or {},
+                            ensure_ascii=False,
+                        ),
                         dataset_id=self.dataset_id,
                         extraction_version=settings.EXTRACTION_VERSION,
+                        extraction_model=settings.EXTRACTION_MODEL,
                     ).consume()
             return True
         except Exception as exc:
             self._mark_offline(exc)
             return False
+
+    @staticmethod
+    def _entity_row(row: Any) -> Dict[str, Any]:
+        try:
+            attributes = json.loads(row.get("attributes_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            attributes = {}
+        return {
+            "entity_id": row.get("entity_id") or "",
+            "name": row.get("name") or "",
+            "category": row.get("category") or "",
+            "description": row.get("description") or "",
+            "aliases": row.get("aliases") or [],
+            "attributes": attributes if isinstance(attributes, dict) else {},
+        }
+
+    def get_graph_vocabulary(self) -> Dict[str, List[str]]:
+        """Return open-schema types already present for retrieval and normalization."""
+        driver = self.get_driver()
+        if not driver:
+            return {"entity_types": [], "relationship_types": []}
+        try:
+            with driver.session() as session:
+                entity_types = [
+                    row["category"]
+                    for row in session.run(
+                        """
+                        MATCH (e:Entity {dataset_id: $dataset_id})
+                        WHERE e.category IS NOT NULL AND e.category <> 'Topic'
+                        RETURN DISTINCT e.category AS category
+                        ORDER BY category
+                        """,
+                        dataset_id=self.dataset_id,
+                    )
+                ]
+                relationship_types = [
+                    row["relation_type"]
+                    for row in session.run(
+                        """
+                        MATCH ()-[r:RELATION {dataset_id: $dataset_id}]->()
+                        WHERE r.relation_type IS NOT NULL
+                        RETURN DISTINCT r.relation_type AS relation_type
+                        ORDER BY relation_type
+                        """,
+                        dataset_id=self.dataset_id,
+                    )
+                ]
+            return {
+                "entity_types": entity_types,
+                "relationship_types": relationship_types,
+            }
+        except Exception as exc:
+            logger.exception("Could not retrieve graph type vocabulary")
+            raise RuntimeError("Graph type vocabulary lookup failed") from exc
+
+    def get_known_entity_context(
+        self,
+        candidate_names: List[str],
+        *,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve exact graph matches and their immediate evidence-backed context."""
+        names = list(dict.fromkeys(
+            name.strip().casefold()
+            for name in candidate_names
+            if name and name.strip()
+        ))
+        if not names:
+            return []
+        driver = self.get_driver()
+        if not driver:
+            return []
+        try:
+            with driver.session() as session:
+                rows = list(
+                    session.run(
+                        """
+                        MATCH (e:Entity {dataset_id: $dataset_id})
+                        WHERE toLower(e.name) IN $names
+                           OR any(alias IN coalesce(e.aliases, [])
+                                  WHERE toLower(alias) IN $names)
+                        RETURN e.uid AS uid, e.entity_id AS entity_id,
+                               e.name AS name, e.category AS category,
+                               e.description AS description, e.aliases AS aliases,
+                               e.attributes_json AS attributes_json
+                        LIMIT $limit
+                        """,
+                        dataset_id=self.dataset_id,
+                        names=names,
+                        limit=limit,
+                    )
+                )
+                context: Dict[str, Dict[str, Any]] = {}
+                for row in rows:
+                    entity = self._entity_row(row)
+                    entity["relationships"] = []
+                    context[entity["entity_id"]] = entity
+                    related_rows = session.run(
+                        """
+                        MATCH (e:Entity {uid: $uid})-[r:RELATION]-(other:Entity)
+                        RETURN other.entity_id AS entity_id, other.name AS name,
+                               other.category AS category,
+                               other.description AS description,
+                               other.aliases AS aliases,
+                               other.attributes_json AS attributes_json,
+                               r.relation_type AS relation_type,
+                               r.evidence AS evidence
+                        LIMIT 20
+                        """,
+                        uid=row["uid"],
+                    )
+                    entity["relationships"] = [
+                        {
+                            **self._entity_row(related),
+                            "relation_type": related["relation_type"],
+                            "evidence": related["evidence"] or "",
+                        }
+                        for related in related_rows
+                    ]
+                return list(context.values())
+        except Exception as exc:
+            logger.warning("Could not retrieve existing entity context: %s", exc)
+            return []
+
+    def find_entity_candidates(
+        self,
+        *,
+        name: str,
+        category: str,
+        aliases: List[str],
+        attributes: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        """Find exact name/alias or role-context matches without guessing."""
+        names = list(dict.fromkeys(
+            value.strip().casefold()
+            for value in [name, *aliases]
+            if value and value.strip()
+        ))
+        role = str(attributes.get("role") or "").strip().casefold()
+        organization = str(attributes.get("organization") or "").strip().casefold()
+        if not names and not (role and organization):
+            return []
+        driver = self.get_driver()
+        if not driver:
+            return []
+        try:
+            with driver.session() as session:
+                rows = session.run(
+                    """
+                    MATCH (e:Entity {dataset_id: $dataset_id})
+                    WHERE (
+                        toLower(e.name) IN $names
+                        OR any(alias IN coalesce(e.aliases, [])
+                               WHERE toLower(alias) IN $names)
+                    )
+                    OR (
+                        $role <> '' AND $organization <> ''
+                        AND toLower(trim(coalesce(e.role, ''))) = $role
+                        AND toLower(trim(coalesce(e.organization, ''))) = $organization
+                    )
+                    RETURN e.entity_id AS entity_id, e.name AS name,
+                           e.category AS category, e.description AS description,
+                           e.aliases AS aliases, e.attributes_json AS attributes_json
+                    LIMIT 50
+                    """,
+                    dataset_id=self.dataset_id,
+                    names=names,
+                    role=role,
+                    organization=organization,
+                )
+                return [self._entity_row(row) for row in rows]
+        except Exception as exc:
+            logger.exception(
+                "Could not resolve graph entity candidate %r: %s",
+                name,
+                exc,
+            )
+            raise RuntimeError(
+                f"Graph entity candidate lookup failed for {name!r}"
+            ) from exc
 
     def find_person_by_role(self, role: str, organization: str) -> Optional[Dict[str, Any]]:
         """Resolve a unique known person from a role and organization."""
@@ -673,12 +890,11 @@ class GraphBuilder:
                 rows = list(session.run(
                     """
                     MATCH (e:Entity {dataset_id: $dataset_id, category: 'Person'})
-                    WHERE toLower(e.role) = toLower($role)
-                      AND toLower(e.organization) = toLower($organization)
+                    WHERE toLower(trim(e.role)) = toLower($role)
+                      AND toLower(trim(e.organization)) = toLower($organization)
                     RETURN e.entity_id AS entity_id, e.name AS name,
                            e.description AS description, e.aliases AS aliases,
                            e.role AS role, e.organization AS organization
-                    LIMIT 2
                     """,
                     dataset_id=self.dataset_id,
                     role=role.strip(),
@@ -693,7 +909,7 @@ class GraphBuilder:
         driver = self.get_driver()
         if not driver:
             return {
-                "nodes": 0, "edges": 0, "papers": 0, "entities": 0,
+                "nodes": 0, "edges": 0, "documents": 0, "papers": 0, "entities": 0,
                 "core_entities": 0, "findings": 0, "metrics": 0,
                 "mentions": 0, "chunks": 0,
                 "topics": 0, "subtopics": 0, "status": "offline",
@@ -706,35 +922,35 @@ class GraphBuilder:
                     WITH count(n) AS nodes
                     OPTIONAL MATCH ()-[r {dataset_id: $dataset_id}]->()
                     WITH nodes, count(r) AS edges
-                    OPTIONAL MATCH (p:Paper {dataset_id: $dataset_id})
-                    WITH nodes, edges, count(p) AS papers
+                    OPTIONAL MATCH (d {dataset_id: $dataset_id})
+                    WHERE d:Document OR d:Paper
+                    WITH nodes, edges, count(DISTINCT d) AS documents
                     OPTIONAL MATCH (e:Entity {dataset_id: $dataset_id})
-                    WITH nodes, edges, papers, count(e) AS entities,
-                         count(CASE WHEN e.category IN
-                           ['Person', 'Organization', 'Method', 'Dataset']
+                    WITH nodes, edges, documents, count(e) AS entities,
+                         count(CASE WHEN e.category <> 'Topic'
                            THEN e END) AS core_entities,
                          count(CASE WHEN e.category = 'Finding' THEN e END) AS findings,
                          count(CASE WHEN e.category = 'Metric' THEN e END) AS metrics
-                    OPTIONAL MATCH ()-[m:MENTIONS {dataset_id: $dataset_id}]->()
-                    WITH nodes, edges, papers, entities, core_entities, findings,
-                         metrics, count(m) AS mentions
-                    OPTIONAL MATCH (c:Chunk {dataset_id: $dataset_id})
-                    WITH nodes, edges, papers, entities, core_entities, findings,
-                         metrics, mentions, count(c) AS chunks
                     OPTIONAL MATCH (t:TopLevelTopic {dataset_id: $dataset_id})
-                    WITH nodes, edges, papers, entities, core_entities, findings,
-                         metrics, mentions, chunks, count(t) AS topics
+                    WITH nodes, edges, documents, entities, core_entities, findings,
+                         metrics, count(t) AS topics
                     OPTIONAL MATCH (s:Subtopic {dataset_id: $dataset_id})
-                    RETURN nodes, edges, papers, entities, core_entities, findings,
-                           metrics, mentions, chunks, topics, count(s) AS subtopics
+                    RETURN nodes, edges, documents, entities, core_entities, findings,
+                           metrics, topics, count(s) AS subtopics
                     """,
                     dataset_id=self.dataset_id,
                 ).single()
-                return {**dict(record), "documents": record["papers"], "status": "online"}
+                return {
+                    **dict(record),
+                    "papers": record["documents"],
+                    "mentions": 0,
+                    "chunks": 0,
+                    "status": "online",
+                }
         except Exception as exc:
             logger.warning("Could not read graph stats: %s", exc)
             return {
-                "nodes": 0, "edges": 0, "papers": 0, "entities": 0,
+                "nodes": 0, "edges": 0, "documents": 0, "papers": 0, "entities": 0,
                 "core_entities": 0, "findings": 0, "metrics": 0,
                 "mentions": 0, "chunks": 0,
                 "topics": 0, "subtopics": 0, "status": "error",

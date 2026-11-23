@@ -179,13 +179,14 @@ def main() -> int:
         openrouter_ok = check_inference()
         usage = cost_tracker.summary(since_id=usage_start_id)
         print(
-            f"Deep-check cost: ${usage['cost_usd']:.6f} "
-            f"({usage['requests']} requests, {usage['total_tokens']} tokens)"
+            f"Deep-check calculated cost: ${usage['cost_usd']:.8f} "
+            f"({usage['requests']} successful, {usage['failed_requests']} failed, "
+            f"{usage['total_tokens']} known tokens)"
         )
         if usage["unknown_cost_requests"]:
             print(
-                f"WARNING: {usage['unknown_cost_requests']} request(s) returned "
-                "no provider cost; the total excludes them."
+                f"WARNING: {usage['unknown_cost_requests']} request(s) have unknown "
+                "cost because model pricing or token usage is unavailable."
             )
     neo4j_ok = check_neo4j()
 

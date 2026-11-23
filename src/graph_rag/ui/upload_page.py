@@ -38,12 +38,18 @@ def render_upload_page() -> None:
     with st.expander("📤 Upload New Documents (Single, Multiple, or Archive)", expanded=True):
         st.markdown(
             "**Supported Formats:** PDF (`.pdf`), Word (`.docx`), PowerPoint (`.pptx`), Text (`.txt`, `.md`), "
+            "CSV (`.csv`), Excel (`.xlsx`), JSON (`.json`), Parquet (`.parquet`), "
+            "images (`.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`, `.webp`), "
             "or Compressed Archives (`.zip`, `.rar`, `.7z`, `.tar.gz`)."
         )
 
         uploaded_files = st.file_uploader(
             "Choose files or archives to ingest",
-            type=["pdf", "docx", "pptx", "txt", "md", "zip", "rar", "7z", "tar", "gz"],
+            type=[
+                "pdf", "docx", "pptx", "txt", "md", "csv", "xlsx", "json",
+                "parquet", "bmp", "jpeg", "jpg", "png", "tif", "tiff",
+                "webp", "zip", "rar", "7z", "tar", "gz",
+            ],
             accept_multiple_files=True,
             help=f"Maximum allowed file size: {settings.MAX_UPLOAD_SIZE_MB}MB",
         )
@@ -122,7 +128,10 @@ def render_upload_page() -> None:
         st.caption(f"Showing **{len(filtered_df)}** of **{len(df)}** registered documents")
 
         # Format display columns
-        display_cols = ["title", "topic", "authors", "source", "local_pdf", "ingested_at"]
+        display_cols = [
+            "title", "topic", "authors", "file_type", "language",
+            "source", "local_pdf", "ingested_at",
+        ]
         available_cols = [c for c in display_cols if c in filtered_df.columns]
         st.dataframe(
             filtered_df[available_cols],

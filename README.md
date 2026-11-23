@@ -14,7 +14,8 @@
   - **Structured Evidence Aggregation**: Fuses MMR vector excerpts, graph pathways, and cross-references into an attributed context payload.
   - **Adaptive LLM Synthesis**: Tailors cloud-model prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
 - **Task-Specific Cloud Models**: Extraction, answer generation, evaluation, and embeddings each use an explicit OpenRouter model selected in `.env`; credentials are never committed.
-- **Evidence-First Graph**: Top-level topics, subtopics, papers, chunks, mentions, and canonical entities are separate graph objects. Every semantic relation keeps its paper, chunk, evidence, confidence, and extraction version.
+- **Evidence-First Graph**: Documents, topics, subtopics, and canonical entities are stored in Neo4j; text chunks and entity vectors remain in ChromaDB. Evidence, mention provenance, and non-blocking diagnostics are stored in SQLite. Neo4j does not create Chunk or Mention nodes, and relationship types remain open-ended properties on generic `RELATION` edges.
+- **Automatic Open-Schema Ingestion**: LangChain coordinates document-level graph extraction. spaCy supplies sentence, token, NER, dependency, and noun-phrase candidates only; evidence- and confidence-validated LLM results determine graph facts. Entity/type normalization, duplicate resolution, topic hierarchy, and ambiguous-case diagnostics require no routine manual review.
 - **Dual Data Sources**:
   1. **Initial Repository**: The current research corpus placed in the `pdfs/` folder.
   2. **Dynamic UI Uploads**: Users can upload new papers directly in the Streamlit UI.
@@ -22,10 +23,10 @@
   - `pdfs/metadata.csv` acts as the single source of truth and catalog.
   - Checks in-memory (SHA-256 hash, filename, and paper title) **before saving anything to disk**.
   - **If a file already exists in our data**: It is **NOT saved** to disk and **NO backend processing** (no chunking, embedding, or graph building) is performed.
-- **Multi-Format & Archive Ingestion**: Supports `.pdf`, `.docx` (Word), `.pptx` (PowerPoint), `.txt`, `.md`, and automatic unpacking of `.zip`, `.rar`, `.7z`, and `.tar.gz`.
+- **Multi-Format & Archive Ingestion**: Supports PDF, Word, PowerPoint, text, Markdown, CSV, Excel, JSON, Parquet, and common image formats, with automatic unpacking of `.zip`, `.rar`, `.7z`, and `.tar.gz`.
 - **User Authentication**: Secure registration and login powered by `bcrypt` password hashing and `JWT` session tokens.
 - **Persistent Chat History**: Multi-session conversation management stored in SQLite with expandable paper citations and page numbers.
-- **Live RAG Evaluation**: Real-time scoring using **LLM-as-a-Judge** (Faithfulness, Answer Relevance, Context Relevance) plus millisecond latency telemetry across retrieval, generation, and evaluation stages.
+- **Live RAG Evaluation**: Real-time scoring using **LLM-as-a-Judge** (Faithfulness, Answer Relevance, Context Relevance) plus millisecond latency telemetry across retrieval, generation, and evaluation stages. Failed or invalid judge responses are shown as unavailable rather than fabricated scores.
 
 ---
 
@@ -63,7 +64,7 @@ graph TB
 
     subgraph "Document Ingestion & Deduplication"
         InitPDFs["Current pdfs/ Corpus"] --> DedupCheck
-        UserUploads["User Uploads (PDF/DOCX/PPTX/Archives)"] --> DedupCheck
+        UserUploads["User Uploads (PDF/Office/Text/Tables/Images/Archives)"] --> DedupCheck
         DedupCheck{"3-Layer Dedup Check<br>(Hash, Filename, Title)"}
         DedupCheck -->|Duplicate| Reject["🚫 Reject: Do not save, do not process"]
         DedupCheck -->|Genuinely New| Save["Save to pdfs/ & Parse Document"]
@@ -193,7 +194,11 @@ flowchart TD
    session. Existing sessions remain persisted and available in the sidebar.
 2. **Ingestion**: Files are checked for duplicates before parsing or storage.
    New documents are parsed, chunked, embedded into ChromaDB, and represented
-   as entities and relationships in Neo4j.
+   as entities and relationships in Neo4j. Structured source rows are retained
+   in SQLite; page/OCR provenance and detected file type, MIME type, and
+   language are recorded as well.
+   LangChain supplies the model clients, text splitter, Chroma integration,
+   structured extraction chain, and bounded parallel retrieval.
 3. **Hybrid retrieval**: Each question searches both ChromaDB for relevant text
    and Neo4j for connected graph facts. The results are merged with citations.
 4. **Answer generation**: The configured cloud model generates an answer grounded in the assembled
@@ -205,6 +210,12 @@ flowchart TD
 </details>
 
 ## 📊 How It Works (In Simple Words)
+
+Scanned PDFs and image inputs use local Tesseract OCR. Install Tesseract with
+both the English (`eng`) and Arabic (`ara`) language data, and ensure the
+executable is available on `PATH`. OCR language and PDF render DPI are
+configurable with `OCR_LANGUAGES` and `OCR_DPI`; no OCR service credentials are
+required.
 
 1. **Initial Startup (Mode A)**:
    The system scans the current `pdfs/` corpus and checks `pdfs/metadata.csv`. New papers are parsed, split into overlapping chunks, embedded with the configured cloud embedding model, and written to a versioned ChromaDB collection and the evidence-first Neo4j graph.
@@ -303,22 +314,51 @@ To make minimal paid calls that also verify credits and model permissions:
 uv run python scripts/test_connections.py --deep
 ```
 
-### 8. Run Batch Ingestion (Initial Papers)
-To index the papers located in `pdfs/`:
+### 8. Run Batch Ingestion
+Add supported documents to `pdfs/` and run:
 ```bash
 uv run python scripts/ingest.py
 ```
-*Tip: If you rerun this command, it checks `metadata.csv` and skips papers already ingested.*
+*Tip: Unchanged or renamed duplicate content is skipped; new and changed documents are processed automatically.*
 
-Graph extraction now runs once per paper and is cached under
+Graph extraction runs once per document (splitting only when the model context
+limit requires it) and is cached under
 `data/extraction_cache/`. A graph rebuild reuses that cache and does not call
-the extraction model again:
+the extraction model again. Rebuilds require a complete, compatible cache:
 ```bash
 uv run python scripts/ingest.py --limit 3 --rebuild-graph
 ```
-Only use `--refresh-extraction` when a deliberately fresh paid extraction is
-required. The CLI prints the tokens and OpenRouter-reported USD cost for every
-run, split by extraction and embedding. Chat and evaluation costs are shown in
+If the operating system blocks spaCy's native runtime, ingestion logs a warning
+and uses a deterministic lexical fallback for sentence boundaries and token
+budgeting; spaCy NER, dependency, and noun-phrase candidates are unavailable
+until that runtime is allowed to load. Missing configured spaCy models remain
+an explicit error.
+Only use `--refresh-extraction` when a deliberately fresh extraction is
+required. Cache entries are versioned by document content, model, prompt,
+extraction pipeline, and normalization versions. Model usage is recorded per API
+request with role, outcome, latency, retry/cache status, token counts,
+request/run IDs, and the pricing rates used. Costs are calculated
+locally without an LLM:
+
+```text
+cost = (input_tokens * input_USD_per_million
+      + output_tokens * output_USD_per_million) / 1,000,000
+```
+
+The versioned rate card is in `src/graph_rag/llm/pricing.py`. It currently
+records Gemma 4 31B Free at $0, Qwen3 Embedding 8B at $0.01 per million input
+tokens, and Qwen3.7 Flash at $0.03/$0.13 per million input/output tokens.
+Qwen3.7 Flash uses its published higher tiers at prompts of 32K and 256K
+tokens.
+Token counts come from API usage metadata; the provider-reported cost, when
+present, is stored separately for comparison. If a model is not in the local
+rate card or token counts are unavailable for a paid model, the calculated cost
+is explicitly marked unknown rather than guessed. Update the rate card when
+model IDs or provider prices change. Pricing references: [OpenRouter models
+API](https://openrouter.ai/api/v1/models) and [embedding models
+API](https://openrouter.ai/api/v1/embeddings/models).
+
+The CLI prints per-run calculated cost, and recent request details appear in
 the application sidebar. Live evaluation is disabled by default during
 development to avoid extra judge-model calls.
 
@@ -348,13 +388,14 @@ graph-rag/
 ├── README.md                     # Documentation and architecture guide
 ├── pdfs/                         # Knowledge base documents
 │   ├── metadata.csv              # Single source of truth catalog & registry
-│   └── *.pdf                     # Research papers
+│   └── supported documents       # PDF, Office, text, tables, images, Parquet
 │
 ├── scripts/
 │   ├── setup_db.py               # Initializes SQLite tables
 │   ├── ingest.py                 # CLI batch ingestion for pdfs/ folder
 │   ├── test_dedup.py             # Deduplication verification test
 │   ├── test_adaptive_rag.py      # Adaptive Hybrid RAG & MMR test suite
+│   ├── test_file_formats.py      # Isolated format and graph-safety tests
 │   └── test_query_engine.py      # End-to-end query engine validation
 │
 └── src/graph_rag/
@@ -375,11 +416,14 @@ graph-rag/
     ├── ingestion/
     │   ├── metadata_manager.py   # Thread-safe read/append for metadata.csv
     │   ├── dedup_checker.py      # 3-layer in-memory duplicate detector
-    │   ├── pdf_parser.py         # PyMuPDF text & heading extraction
-    │   ├── docx_parser.py        # Word text extractor
-    │   ├── pptx_parser.py        # PowerPoint text extractor
+    │   ├── pdf_parser.py         # PyMuPDF text, OCR routing, and table extraction
+    │   ├── docx_parser.py        # Word text, table, and image extraction
+    │   ├── pptx_parser.py        # PowerPoint text, table, and image extraction
+    │   ├── image_parser.py       # Standalone image OCR
+    │   ├── ocr.py                # Replaceable OCR provider and Tesseract adapter
     │   ├── archive_handler.py    # Safe ZIP/RAR/7z/tar unpacker
-    │   ├── file_handler.py       # Format router
+    │   ├── file_handler.py       # Extensible format router
+    │   ├── structured_parser.py  # CSV, XLSX, JSON, and Parquet tables
     │   ├── chunker.py            # 1000-token chunker with overlap (150 tokens)
     │   └── pipeline.py           # Ingestion orchestrator (batch & upload)
     │

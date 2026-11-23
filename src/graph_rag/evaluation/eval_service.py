@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EvaluationRecord:
     """Full evaluation assessment for a single query response."""
-    faithfulness: float
-    answer_relevance: float
-    context_relevance: float
+    faithfulness: Optional[float]
+    answer_relevance: Optional[float]
+    context_relevance: Optional[float]
     faithfulness_reasoning: str
     answer_relevance_reasoning: str
     context_relevance_reasoning: str
@@ -101,12 +101,12 @@ class EvaluationService:
             logger.warning(f"Could not persist evaluation log to database: {e}")
 
         logger.info(
-            "Evaluation scores: faithfulness=%.3f answer_relevance=%.3f "
-            "context_relevance=%.3f retrieval_ms=%d generation_ms=%d "
+            "Evaluation scores: faithfulness=%s answer_relevance=%s "
+            "context_relevance=%s retrieval_ms=%d generation_ms=%d "
             "eval_ms=%d total_ms=%d",
-            faith_score,
-            relevance_score,
-            ctx_score,
+            f"{faith_score:.3f}" if faith_score is not None else "unavailable",
+            f"{relevance_score:.3f}" if relevance_score is not None else "unavailable",
+            f"{ctx_score:.3f}" if ctx_score is not None else "unavailable",
             lat.retrieval_ms,
             lat.generation_ms,
             lat.eval_ms,
@@ -156,6 +156,10 @@ class EvaluationService:
                 """
                 SELECT
                     COUNT(*) as total_evaluations,
+                    SUM(CASE WHEN faithfulness IS NOT NULL
+                                  OR answer_relevance IS NOT NULL
+                                  OR context_relevance IS NOT NULL
+                             THEN 1 ELSE 0 END) as scored_evaluations,
                     ROUND(AVG(faithfulness), 2) as avg_faithfulness,
                     ROUND(AVG(answer_relevance), 2) as avg_answer_relevance,
                     ROUND(AVG(context_relevance), 2) as avg_context_relevance,
@@ -170,9 +174,10 @@ class EvaluationService:
                 return dict(row)
             return {
                 "total_evaluations": 0,
-                "avg_faithfulness": 0.0,
-                "avg_answer_relevance": 0.0,
-                "avg_context_relevance": 0.0,
+                "scored_evaluations": 0,
+                "avg_faithfulness": None,
+                "avg_answer_relevance": None,
+                "avg_context_relevance": None,
                 "avg_retrieval_ms": 0,
                 "avg_generation_ms": 0,
                 "avg_total_ms": 0,

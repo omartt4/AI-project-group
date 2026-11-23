@@ -70,11 +70,13 @@ def render_chat_page() -> None:
             if ev:
                 c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 3])
                 with c1:
-                    faith = ev.get("faithfulness", 0.0)
-                    st.markdown(f"<span class='badge-faith'>✅ Grounding: {int(faith * 100)}%</span>", unsafe_allow_html=True)
+                    faith = ev.get("faithfulness")
+                    faith_label = f"{int(faith * 100)}%" if faith is not None else "N/A"
+                    st.markdown(f"<span class='badge-faith'>✅ Grounding: {faith_label}</span>", unsafe_allow_html=True)
                 with c2:
-                    rel = ev.get("answer_relevance", 0.0)
-                    st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {int(rel * 100)}%</span>", unsafe_allow_html=True)
+                    rel = ev.get("answer_relevance")
+                    rel_label = f"{int(rel * 100)}%" if rel is not None else "N/A"
+                    st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {rel_label}</span>", unsafe_allow_html=True)
                 with c3:
                     total_ms = ev.get("total_ms", 0)
                     st.markdown(f"<span class='badge-latency'>⏱️ {total_ms}ms</span>", unsafe_allow_html=True)
@@ -135,10 +137,14 @@ def render_chat_page() -> None:
                     col_idx += 1
                 if resp.evaluation:
                     with badges_cols[col_idx]:
-                        st.markdown(f"<span class='badge-faith'>✅ Grounding: {int(resp.evaluation.faithfulness * 100)}%</span>", unsafe_allow_html=True)
+                        faith = resp.evaluation.faithfulness
+                        faith_label = f"{int(faith * 100)}%" if faith is not None else "N/A"
+                        st.markdown(f"<span class='badge-faith'>✅ Grounding: {faith_label}</span>", unsafe_allow_html=True)
                     col_idx += 1
                     with badges_cols[col_idx]:
-                        st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {int(resp.evaluation.answer_relevance * 100)}%</span>", unsafe_allow_html=True)
+                        relevance = resp.evaluation.answer_relevance
+                        relevance_label = f"{int(relevance * 100)}%" if relevance is not None else "N/A"
+                        st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {relevance_label}</span>", unsafe_allow_html=True)
                     col_idx += 1
                 with badges_cols[min(col_idx, 4)]:
                     st.markdown(f"<span class='badge-latency'>⏱️ {resp.latency.total_ms}ms</span>", unsafe_allow_html=True)
@@ -162,7 +168,8 @@ def render_chat_page() -> None:
                 st.markdown(
                     f"**Q:** {log.get('question')}  \n"
                     f"⏱️ Retrieval: `{log.get('retrieval_ms', 0)}ms` | Generation: `{log.get('generation_ms', 0)}ms` | Eval: `{log.get('eval_ms', 0)}ms`  \n"
-                    f"⭐ Faithfulness: `{log.get('faithfulness', 0.0)}` | Relevance: `{log.get('answer_relevance', 0.0)}`"
+                    f"⭐ Faithfulness: `{log.get('faithfulness') if log.get('faithfulness') is not None else 'N/A'}` | "
+                    f"Relevance: `{log.get('answer_relevance') if log.get('answer_relevance') is not None else 'N/A'}`"
                 )
                 st.divider()
         else:

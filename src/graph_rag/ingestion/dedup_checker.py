@@ -47,8 +47,8 @@ def normalize_title(title: str) -> str:
     """Clean and normalize a title for reliable comparison."""
     if not title:
         return ""
-    # Lowercase, remove non-alphanumeric, collapse whitespace
-    cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", title.lower())
+    # Preserve Unicode letters so Arabic and other scripts can be deduplicated.
+    cleaned = re.sub(r"[^\w\s]", "", title.casefold(), flags=re.UNICODE)
     return " ".join(cleaned.split())
 
 

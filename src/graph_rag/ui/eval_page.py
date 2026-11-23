@@ -13,6 +13,10 @@ import pandas as pd
 from graph_rag.evaluation.eval_service import eval_service
 
 
+def _format_percent(value: float | None) -> str:
+    return f"{int(value * 100)}%" if value is not None else "N/A"
+
+
 def render_eval_page() -> None:
     """Render the RAG Evaluation & Telemetry Dashboard."""
     st.subheader("📊 Live Session Evaluation & RAG Telemetry")
@@ -22,6 +26,7 @@ def render_eval_page() -> None:
 
     summary = eval_service.get_overall_summary()
     total_evals = summary.get("total_evaluations", 0)
+    scored_evals = summary.get("scored_evaluations", 0)
 
     # ── Top KPIs ──
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -35,14 +40,14 @@ def render_eval_page() -> None:
         faith_val = summary.get("avg_faithfulness", 0.0)
         st.metric(
             label="Avg Grounding / Faithfulness",
-            value=f"{int(faith_val * 100)}%",
+            value=_format_percent(faith_val),
             help="Measures whether claims in the answer are supported by retrieved context",
         )
     with kpi3:
         rel_val = summary.get("avg_answer_relevance", 0.0)
         st.metric(
             label="Avg Answer Relevance",
-            value=f"{int(rel_val * 100)}%",
+            value=_format_percent(rel_val),
             help="Measures whether the answer addresses the user's specific prompt",
         )
     with kpi4:
@@ -64,7 +69,11 @@ def render_eval_page() -> None:
         st.metric("LLM Answer Generation", f"{summary.get('avg_generation_ms', 0):,.0f} ms")
     with lat3:
         ctx_rel = summary.get("avg_context_relevance", 0.0)
-        st.metric("Avg Context Relevance", f"{int(ctx_rel * 100)}%")
+        st.metric("Avg Context Relevance", _format_percent(ctx_rel))
+    if total_evals and not scored_evals:
+        st.caption("Evaluation attempts are recorded, but no valid scores are available.")
+    elif scored_evals < total_evals:
+        st.caption(f"Scores are available for {scored_evals} of {total_evals} evaluation attempts.")
 
     st.divider()
 
@@ -74,8 +83,12 @@ def render_eval_page() -> None:
 
     if recent_logs:
         for log in recent_logs:
+            faithfulness = log.get("faithfulness")
+            faith_label = (
+                f"{int(faithfulness * 100)}%" if faithfulness is not None else "N/A"
+            )
             with st.expander(
-                f"[{log.get('created_at', '')[:19]}] Q: {log.get('question', '')[:65]}... (Faith: {int(log.get('faithfulness', 0)*100)}% | Total: {log.get('total_ms', 0)}ms)",
+                f"[{log.get('created_at', '')[:19]}] Q: {log.get('question', '')[:65]}... (Faith: {faith_label} | Total: {log.get('total_ms', 0)}ms)",
                 expanded=False,
             ):
                 c_q, c_a = st.columns([1, 1])

@@ -28,28 +28,28 @@ from graph_rag.llm.cost_tracker import cost_tracker
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(description="Graph RAG Ingestion CLI")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of PDFs to process")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of supported documents to process")
     parser.add_argument(
         "--file",
         dest="only_filename",
         default=None,
-        help="Process one exact PDF filename from the configured pdfs folder",
+        help="Process one exact supported document filename from the configured folder",
     )
     parser.add_argument(
         "--rebuild-graph",
         action="store_true",
-        help="Rebuild Neo4j from cached extraction without duplicating embeddings",
+        help="Rebuild Neo4j from a complete compatible extraction cache",
     )
     parser.add_argument(
         "--refresh-extraction",
         action="store_true",
-        help="Ignore cached extraction and pay for a fresh paper-level extraction",
+        help="Ignore cache and request a fresh document-level extraction",
     )
     args = parser.parse_args()
 
     print("=" * 65)
     print("Graph RAG Ingestion Pipeline")
-    print(f"PDF Directory:    {settings.PDF_DIR}")
+    print(f"Document Directory: {settings.PDF_DIR}")
     print(f"Metadata File:    {settings.METADATA_FILE}")
     print(f"ChromaDB Path:    {settings.CHROMA_PERSIST_DIR}")
     print(f"Chroma Collection:{settings.CHROMA_COLLECTION_NAME}")
@@ -101,19 +101,26 @@ def main() -> None:
         )
     run_usage = cost_tracker.summary(since_id=usage_start_id)
     print(
-        f"  - This run API cost: ${run_usage['cost_usd']:.6f} "
-        f"({run_usage['requests']} requests, {run_usage['total_tokens']} tokens)"
+        f"  - This run calculated API cost: ${run_usage['cost_usd']:.8f} "
+        f"({run_usage['requests']} successful, {run_usage['failed_requests']} "
+        f"failed, {run_usage['total_tokens']} known tokens)"
     )
     if run_usage["unknown_cost_requests"]:
         print(
             "    WARNING: "
-            f"{run_usage['unknown_cost_requests']} request(s) returned no cost; "
-            "the dollar total excludes them."
+            f"{run_usage['unknown_cost_requests']} request(s) have unknown cost "
+            "because model pricing or token usage is unavailable."
         )
     for row in run_usage["breakdown"]:
+        cost_label = (
+            f"${float(row['cost_usd']):.8f}"
+            if row["cost_usd"] is not None
+            else "unknown cost"
+        )
         print(
-            f"      {row['role']}: ${float(row['cost_usd']):.6f} "
-            f"({int(row['requests'])} requests, "
+            f"      {row['role']}: {cost_label} "
+            f"({int(row['requests'])} successful, "
+            f"{int(row['failed_requests'])} failed, "
             f"{int(row['unknown_cost_requests'])} unknown-cost)"
         )
     print("=" * 65)

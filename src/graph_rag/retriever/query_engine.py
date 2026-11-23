@@ -11,13 +11,14 @@ Coordinates:
 """
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from graph_rag.config import settings
 from graph_rag.evaluation.eval_service import EvaluationRecord, eval_service
 from graph_rag.evaluation.latency_tracker import LatencyMetrics, StageTimer
-from graph_rag.llm.model_client import chat_model_client
+from graph_rag.llm.model_client import chat_model_client, model_request_context
 from graph_rag.retriever.hybrid_retriever import hybrid_retriever
 from graph_rag.retriever.query_classifier import QueryClassification, QueryClass
 
@@ -54,6 +55,8 @@ Ensure proper attribution to the papers and page numbers cited.""",
 Respond helpfully, politely, and concisely. If the user asks what you can do, briefly explain that you can answer questions, compare techniques, trace knowledge graph relationships, and synthesize insights across the research paper library.""",
 }
 
+LANGUAGE_INSTRUCTION = """Answer in the same language as the user's question unless they explicitly request another language. For mixed-language questions, use the predominant language while preserving technical terms, proper names, and citations as appropriate."""
+
 
 def build_prompts(
     question: str,
@@ -62,7 +65,10 @@ def build_prompts(
 ) -> tuple[str, str]:
     """Generate adaptive system prompt and user prompt based on query intent."""
     q_class = classification.query_class if classification else QueryClass.EXPLORATORY_THEMATIC
-    sys_prompt = SYSTEM_PROMPTS.get(q_class, SYSTEM_PROMPTS[QueryClass.EXPLORATORY_THEMATIC])
+    sys_prompt = (
+        f"{SYSTEM_PROMPTS.get(q_class, SYSTEM_PROMPTS[QueryClass.EXPLORATORY_THEMATIC])}"
+        f"\n\n{LANGUAGE_INSTRUCTION}"
+    )
 
     if q_class == QueryClass.CONVERSATIONAL:
         user_prompt = f"User: {question}\n\nAssistant:"
@@ -111,11 +117,13 @@ class QueryEngine:
     ) -> QueryEngineResponse:
         """Process user question through the adaptive hybrid RAG pipeline."""
         latency = LatencyMetrics()
+        run_id = uuid.uuid4().hex
         logger.info("Query started: session_id=%s user_id=%s question=%r", session_id, user_id, question[:2000])
 
         # Stage 1: Adaptive Hybrid Retrieval (Query Classification + Dynamic K + MMR + Graph Discovery)
-        with StageTimer() as ret_timer:
-            retrieval_res = self.retriever.adaptive_retrieve(query=question)
+        with model_request_context(run_id=run_id, user_id=user_id):
+            with StageTimer() as ret_timer:
+                retrieval_res = self.retriever.adaptive_retrieve(query=question)
         latency.retrieval_ms = ret_timer.elapsed_ms
 
         context_text = retrieval_res.assembled_text
@@ -143,11 +151,12 @@ class QueryEngine:
         with StageTimer() as gen_timer:
             generation_succeeded = True
             try:
-                answer = self.llm.generate(
-                    prompt=user_prompt,
-                    system_prompt=sys_prompt,
-                    temperature=0.2 if (qc and qc.query_class != QueryClass.CONVERSATIONAL) else 0.7,
-                )
+                with model_request_context(run_id=run_id, user_id=user_id):
+                    answer = self.llm.generate(
+                        prompt=user_prompt,
+                        system_prompt=sys_prompt,
+                        temperature=0.2 if (qc and qc.query_class != QueryClass.CONVERSATIONAL) else 0.7,
+                    )
             except Exception as e:
                 logger.error(f"LLM Generation failed: {e}")
                 generation_succeeded = False
@@ -171,15 +180,16 @@ class QueryEngine:
 
         if should_evaluate:
             try:
-                eval_record = self.eval.evaluate_turn(
-                    question=question,
-                    answer=answer,
-                    context=context_text,
-                    message_id=message_id,
-                    session_id=session_id,
-                    user_id=user_id,
-                    latency=latency,
-                )
+                with model_request_context(run_id=run_id, user_id=user_id):
+                    eval_record = self.eval.evaluate_turn(
+                        question=question,
+                        answer=answer,
+                        context=context_text,
+                        message_id=message_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                        latency=latency,
+                    )
             except Exception as e:
                 logger.warning(f"Evaluation failed: {e}")
 
@@ -191,11 +201,11 @@ class QueryEngine:
 
         if eval_record:
             logger.info(
-                "Evaluation completed: faithfulness=%.3f answer_relevance=%.3f "
-                "context_relevance=%.3f eval_ms=%d total_ms=%d",
-                eval_record.faithfulness,
-                eval_record.answer_relevance,
-                eval_record.context_relevance,
+                "Evaluation completed: faithfulness=%s answer_relevance=%s "
+                "context_relevance=%s eval_ms=%d total_ms=%d",
+                f"{eval_record.faithfulness:.3f}" if eval_record.faithfulness is not None else "unavailable",
+                f"{eval_record.answer_relevance:.3f}" if eval_record.answer_relevance is not None else "unavailable",
+                f"{eval_record.context_relevance:.3f}" if eval_record.context_relevance is not None else "unavailable",
                 eval_record.latency.eval_ms,
                 latency.total_ms,
             )

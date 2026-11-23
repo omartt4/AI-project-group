@@ -1,28 +1,145 @@
-"""Cloud model client used for generation and embeddings.
-
-The implementation uses OpenRouter's OpenAI-compatible HTTP endpoints without
-binding the application to a particular chat or embedding model.
-"""
+"""LangChain-backed model clients for configurable OpenRouter models."""
 
 from __future__ import annotations
 
-import logging
+import time
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
 import httpx
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.embeddings import Embeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import OpenAIEmbeddings
+from langchain_openrouter import ChatOpenRouter
 
 from graph_rag.config import settings
 from graph_rag.llm.cost_tracker import cost_tracker
-
-logger = logging.getLogger(__name__)
 
 
 class ModelConfigurationError(RuntimeError):
     """Raised when required cloud model settings are missing."""
 
 
+class ModelRequestContext:
+    """Context shared by model calls participating in one user or ingest run."""
+
+    def __init__(self, run_id: str | None = None, user_id: int | None = None) -> None:
+        self.run_id = run_id
+        self.user_id = user_id
+
+
+_request_context: ContextVar[ModelRequestContext] = ContextVar(
+    "model_request_context",
+    default=ModelRequestContext(),
+)
+
+
+@contextmanager
+def model_request_context(run_id: str | None = None, user_id: int | None = None):
+    """Attach correlation identifiers to nested LangChain and embedding calls."""
+    token = _request_context.set(ModelRequestContext(run_id=run_id, user_id=user_id))
+    try:
+        yield
+    finally:
+        _request_context.reset(token)
+
+
+class ModelUsageCallbackHandler(BaseCallbackHandler):
+    """Track usage and failures for LangChain model calls outside generate()."""
+
+    run_inline = True
+
+    def __init__(self, role: str, model: str) -> None:
+        self.role = role
+        self.model = model
+        self.request_id = uuid.uuid4().hex
+        self.context = _request_context.get()
+        self.started: Dict[str, float] = {}
+
+    def on_chat_model_start(
+        self,
+        serialized: Dict[str, Any],
+        messages: List[List[Any]],
+        *,
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ) -> None:
+        self.started[str(run_id)] = time.perf_counter()
+
+    def on_llm_start(
+        self,
+        serialized: Dict[str, Any],
+        prompts: List[str],
+        *,
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ) -> None:
+        self.started[str(run_id)] = time.perf_counter()
+
+    def on_llm_end(self, response: Any, *, run_id: uuid.UUID, **kwargs: Any) -> None:
+        usage = CloudModelClient._usage_from_response(response)
+        self._record(
+            status="success",
+            usage=usage,
+            run_id=str(run_id),
+        )
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: uuid.UUID,
+        **kwargs: Any,
+    ) -> None:
+        self._record(
+            status="failed",
+            usage={},
+            run_id=str(run_id),
+            error_message=str(error),
+        )
+
+    def _record(
+        self,
+        *,
+        status: str,
+        usage: Dict[str, Any],
+        run_id: str,
+        error_message: str | None = None,
+    ) -> None:
+        started = self.started.pop(run_id, time.perf_counter())
+        cost_tracker.record(
+            role=self.role,
+            operation="generation",
+            model=self.model,
+            endpoint="/chat/completions",
+            usage=usage,
+            request_id=self.request_id,
+            run_id=self.context.run_id,
+            user_id=self.context.user_id,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            status=status,
+            error_message=error_message,
+        )
+
+
+class OpenRouterEmbeddings(Embeddings):
+    """Expose the configured OpenRouter embedding endpoint to LangChain stores."""
+
+    def __init__(self, client: "CloudModelClient") -> None:
+        self.client = client
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self.client.get_embeddings_batch(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.client.get_embedding(text)
+
+
 class CloudModelClient:
-    """Small OpenRouter client bound to one chat role and/or embeddings."""
+    """Role-specific LangChain model adapter with backward-compatible methods."""
 
     def __init__(
         self,
@@ -41,88 +158,83 @@ class CloudModelClient:
         self.timeout_seconds = settings.MODEL_TIMEOUT_SECONDS
         self.max_retries = settings.MODEL_MAX_RETRIES
         self.role = role
+        self._chat_model_instance: Optional[ChatOpenRouter] = None
+        self._embedding_model_instance: Optional[OpenAIEmbeddings] = None
 
-    def _headers(self) -> Dict[str, str]:
+    def _require_api_key(self) -> str:
         if not self.api_key:
             raise ModelConfigurationError(
                 "OPENROUTER_API_KEY is missing. Add it to the local .env file."
             )
+        return self.api_key
+
+    def _get_chat_model(self) -> ChatOpenRouter:
+        if not self.llm_model:
+            raise ModelConfigurationError(
+                "This client's OpenRouter chat model is missing. Configure the "
+                "matching OPENROUTER_*_MODEL value in .env."
+            )
+        if self._chat_model_instance is None:
+            self._chat_model_instance = ChatOpenRouter(
+                model=self.llm_model,
+                api_key=self._require_api_key(),
+                base_url=self.base_url,
+                temperature=0.2,
+                timeout=int(self.timeout_seconds * 1000),
+                max_retries=self.max_retries,
+                app_url=settings.OPENROUTER_SITE_URL or None,
+                app_title=settings.OPENROUTER_APP_NAME,
+            )
+        return self._chat_model_instance
+
+    def _get_embedding_model(self) -> OpenAIEmbeddings:
+        if not self.embed_model:
+            raise ModelConfigurationError(
+                "OPENROUTER_EMBED_MODEL is missing. Add an embedding model ID to .env."
+            )
+        if self._embedding_model_instance is None:
+            headers = {"X-Title": settings.OPENROUTER_APP_NAME}
+            if settings.OPENROUTER_SITE_URL:
+                headers["HTTP-Referer"] = settings.OPENROUTER_SITE_URL
+            self._embedding_model_instance = OpenAIEmbeddings(
+                model=self.embed_model,
+                api_key=self._require_api_key(),
+                base_url=self.base_url,
+                dimensions=settings.EMBEDDING_DIMENSIONS or None,
+                timeout=self.timeout_seconds,
+                max_retries=self.max_retries,
+                default_headers=headers,
+                tiktoken_enabled=False,
+                check_embedding_ctx_length=False,
+            )
+        return self._embedding_model_instance
+
+    def as_embeddings(self) -> Embeddings:
+        """Return a lazy LangChain Embeddings adapter for vector-store integrations."""
+        return OpenRouterEmbeddings(self)
+
+    def as_chat_model(self) -> ChatOpenRouter:
+        """Return the LangChain chat model for Runnable composition."""
+        return self._get_chat_model()
+
+    def is_available(self) -> bool:
+        """Check OpenRouter's model-list endpoint without issuing a model request."""
+        if not self.api_key or not (self.llm_model or self.embed_model):
+            return False
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
             "X-Title": settings.OPENROUTER_APP_NAME,
         }
         if settings.OPENROUTER_SITE_URL:
             headers["HTTP-Referer"] = settings.OPENROUTER_SITE_URL
-        return headers
-
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        last_error: Optional[Exception] = None
-        retryable_statuses = {408, 409, 429, 500, 502, 503, 504, 524, 529}
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                with httpx.Client(
-                    base_url=self.base_url,
-                    headers=self._headers(),
-                    timeout=self.timeout_seconds,
-                ) as client:
-                    response = client.post(path, json=payload)
-                if response.status_code in retryable_statuses and attempt < self.max_retries:
-                    logger.warning(
-                        "Cloud model request returned %s; retrying (%s/%s)",
-                        response.status_code,
-                        attempt + 1,
-                        self.max_retries,
-                    )
-                    continue
-                response.raise_for_status()
-                data = response.json()
-                if not isinstance(data, dict):
-                    raise RuntimeError("Cloud model returned a non-object response")
-                return data
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code not in retryable_statuses or attempt >= self.max_retries:
-                    break
-                logger.warning(
-                    "Cloud model request failed; retrying (%s/%s): %s",
-                    attempt + 1,
-                    self.max_retries,
-                    exc,
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = exc
-                if attempt >= self.max_retries:
-                    break
-                logger.warning(
-                    "Cloud model request failed; retrying (%s/%s): %s",
-                    attempt + 1,
-                    self.max_retries,
-                    exc,
-                )
-
-        detail = ""
-        if isinstance(last_error, httpx.HTTPStatusError):
-            try:
-                detail = f" Response: {last_error.response.text[:500]}"
-            except Exception:
-                pass
-        raise RuntimeError(f"Cloud model request failed: {last_error}.{detail}")
-
-    def is_available(self) -> bool:
-        """Return whether the configured API is reachable with valid credentials."""
-        if not self.api_key:
-            return False
         try:
             with httpx.Client(
                 base_url=self.base_url,
-                headers=self._headers(),
+                headers=headers,
                 timeout=5.0,
             ) as client:
-                response = client.get("/models")
-            return response.status_code == 200
-        except Exception:
+                return client.get("/models").status_code == 200
+        except httpx.RequestError:
             return False
 
     def generate(
@@ -131,83 +243,200 @@ class CloudModelClient:
         system_prompt: Optional[str] = None,
         temperature: float = 0.2,
         response_format: Optional[Dict[str, Any]] = None,
+        run_id: str | None = None,
+        user_id: int | None = None,
     ) -> str:
-        """Generate one text response using the configured cloud chat model."""
-        if not self.llm_model:
-            raise ModelConfigurationError(
-                "This client's OpenRouter chat model is missing. Configure the "
-                "matching OPENROUTER_*_MODEL value in .env."
+        """Generate text through a LangChain prompt/model Runnable sequence."""
+        context = _request_context.get()
+        request_id = uuid.uuid4().hex
+        request_run_id = run_id or context.run_id
+        request_user_id = user_id if user_id is not None else context.user_id
+        started = time.perf_counter()
+        try:
+            model = self._get_chat_model().bind(temperature=temperature)
+            if response_format:
+                model = model.bind(response_format=response_format)
+
+            messages = []
+            if system_prompt:
+                messages.append(("system", system_prompt))
+            messages.append(("human", "{prompt}"))
+            prompt_template = ChatPromptTemplate.from_messages(messages)
+            chain = prompt_template | model
+            response = chain.invoke(
+                {"prompt": prompt},
+                config={
+                    "run_name": f"{self.role}-generation",
+                    "metadata": {
+                        "role": self.role,
+                        "model": self.llm_model or "",
+                        "run_id": request_run_id or "",
+                        "user_id": request_user_id or "",
+                    },
+                },
             )
+            content = response.content
+            if isinstance(content, list):
+                content = "\n".join(
+                    block["text"]
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                )
+            if not isinstance(content, str):
+                raise RuntimeError("Cloud chat response content was not text")
+        except Exception as exc:
+            cost_tracker.record(
+                role=self.role,
+                operation="generation",
+                model=self.llm_model or "",
+                endpoint="/chat/completions",
+                usage={},
+                request_id=request_id,
+                run_id=request_run_id,
+                user_id=request_user_id,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
 
-        messages: List[Dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        payload: Dict[str, Any] = {
-            "model": self.llm_model,
-            "messages": messages,
-            "temperature": temperature,
-            "usage": {"include": True},
-        }
-        if response_format:
-            payload["response_format"] = response_format
-
-        data = self._post("/chat/completions", payload)
         cost_tracker.record(
             role=self.role,
             operation="generation",
-            model=self.llm_model,
+            model=self.llm_model or "",
             endpoint="/chat/completions",
-            usage=data.get("usage") or {},
+            usage=self._usage_from_response(response),
+            request_id=request_id,
+            run_id=request_run_id,
+            user_id=request_user_id,
+            latency_ms=int((time.perf_counter() - started) * 1000),
         )
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("Cloud chat response did not contain message content") from exc
-        if not isinstance(content, str):
-            raise RuntimeError("Cloud chat response content was not text")
         return content.strip()
 
+    @staticmethod
+    def _usage_from_response(response: Any) -> Dict[str, Any]:
+        message = response
+        generations = getattr(response, "generations", None)
+        if generations and generations[0]:
+            message = getattr(generations[0][0], "message", None)
+
+        usage = dict(getattr(message, "usage_metadata", None) or {})
+        metadata = getattr(message, "response_metadata", None) or {}
+        output = getattr(response, "llm_output", None) or {}
+        provider_usage = (
+            metadata.get("token_usage")
+            or metadata.get("usage")
+            or output.get("token_usage")
+            or output.get("usage")
+            or {}
+        )
+        if isinstance(provider_usage, dict):
+            for key, value in provider_usage.items():
+                usage.setdefault(key, value)
+        if "input_tokens" in usage:
+            usage.setdefault("prompt_tokens", usage["input_tokens"])
+        if "output_tokens" in usage:
+            usage.setdefault("completion_tokens", usage["output_tokens"])
+        if "cost" in metadata:
+            usage.setdefault("cost", metadata["cost"])
+        elif "cost" in output:
+            usage.setdefault("cost", output["cost"])
+        return usage
+
     def get_embedding(self, text: str) -> List[float]:
-        """Create one embedding vector."""
-        vectors = self.get_embeddings_batch([text])
-        return vectors[0]
+        """Create one embedding with the configured LangChain integration."""
+        return self.get_embeddings_batch([text])[0]
 
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Create embeddings in one ordered batch request."""
+        """Create an ordered embedding batch with the configured integration."""
         if not texts:
             return []
-        if not self.embed_model:
-            raise ModelConfigurationError(
-                "OPENROUTER_EMBED_MODEL is missing. Add an embedding model ID to .env."
+        context = _request_context.get()
+        try:
+            model = self._get_embedding_model()
+            model._ensure_sync_client_available()
+        except Exception as exc:
+            cost_tracker.record(
+                role=self.role,
+                operation="embedding",
+                model=self.embed_model or "",
+                endpoint="/embeddings",
+                usage={},
+                request_id=uuid.uuid4().hex,
+                run_id=context.run_id,
+                user_id=context.user_id,
+                status="failed",
+                error_message=str(exc),
             )
+            raise
 
-        payload: Dict[str, Any] = {
-            "model": self.embed_model,
-            "input": texts,
-            "usage": {"include": True},
-        }
-        if settings.EMBEDDING_DIMENSIONS:
-            payload["dimensions"] = settings.EMBEDDING_DIMENSIONS
+        embeddings: List[List[float]] = []
+        chunk_size = max(1, int(model.chunk_size))
+        for start_index in range(0, len(texts), chunk_size):
+            batch = texts[start_index : start_index + chunk_size]
+            request_id = uuid.uuid4().hex
+            started = time.perf_counter()
+            try:
+                response = model.client.create(
+                    input=batch,
+                    **model._invocation_params,
+                )
+                payload = (
+                    response
+                    if isinstance(response, dict)
+                    else response.model_dump()
+                )
+                data = payload.get("data")
+                if not isinstance(data, list) or len(data) != len(batch):
+                    raise RuntimeError(
+                        "Embedding response did not contain one vector per input"
+                    )
+                data.sort(key=lambda item: item.get("index", 0))
+                embeddings.extend(item["embedding"] for item in data)
+                response_usage = payload.get("usage") or {}
+                input_tokens = response_usage.get(
+                    "prompt_tokens",
+                    response_usage.get(
+                        "input_tokens",
+                        response_usage.get("total_tokens"),
+                    ),
+                )
+                usage = {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": 0,
+                    "total_tokens": response_usage.get("total_tokens", input_tokens),
+                }
+                if "cost" in response_usage:
+                    usage["cost"] = response_usage["cost"]
+            except Exception as exc:
+                cost_tracker.record(
+                    role=self.role,
+                    operation="embedding",
+                    model=self.embed_model or "",
+                    endpoint="/embeddings",
+                    usage={},
+                    request_id=request_id,
+                    run_id=context.run_id,
+                    user_id=context.user_id,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    status="failed",
+                    error_message=str(exc),
+                )
+                raise
+            cost_tracker.record(
+                role=self.role,
+                operation="embedding",
+                model=self.embed_model or "",
+                endpoint="/embeddings",
+                usage=usage,
+                request_id=request_id,
+                run_id=context.run_id,
+                user_id=context.user_id,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        return embeddings
 
-        response = self._post("/embeddings", payload)
-        cost_tracker.record(
-            role=self.role,
-            operation="embedding",
-            model=self.embed_model,
-            endpoint="/embeddings",
-            usage=response.get("usage") or {},
-        )
-        rows = response.get("data")
-        if not isinstance(rows, list) or len(rows) != len(texts):
-            raise RuntimeError("Embedding response count did not match the input count")
-        ordered = sorted(rows, key=lambda row: int(row.get("index", 0)))
-        return [list(row["embedding"]) for row in ordered]
 
-
-# Bind each pipeline responsibility to its own configured model. Keeping these
-# as separate instances makes routing explicit at every call site and prevents
-# extraction or evaluation from accidentally using the answer-generation model.
 extraction_model_client = CloudModelClient(
     llm_model=settings.EXTRACTION_MODEL,
     embed_model="",
@@ -229,7 +458,5 @@ embedding_model_client = CloudModelClient(
     role="embedding",
 )
 
-# Backward-compatible alias for external imports. New application code should
-# import the role-specific client it actually needs.
+# Backward-compatible alias for external imports.
 model_client = chat_model_client
-

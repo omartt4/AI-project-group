@@ -5,9 +5,12 @@ Splits parsed documents into overlapping chunks with metadata preservation.
 Maintains context window boundaries (~1000 tokens with ~150 token overlap).
 """
 
-import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from graph_rag.config import settings
 from graph_rag.ingestion.pdf_parser import ParsedDocument
 
@@ -47,6 +50,12 @@ class TextChunker:
                     doc=doc,
                     page_number=page.page_number,
                     start_idx=global_chunk_idx,
+                    sheet_name=page.sheet_name,
+                    table_name=page.table_name,
+                    section=page.section,
+                    extraction_method=page.extraction_method,
+                    confidence=page.confidence,
+                    language=page.language,
                 )
                 chunks.extend(page_chunks)
                 global_chunk_idx += len(page_chunks)
@@ -66,51 +75,86 @@ class TextChunker:
         doc: ParsedDocument,
         page_number: int,
         start_idx: int,
+        sheet_name: str = "",
+        table_name: str = "",
+        section: str = "",
+        extraction_method: str = "",
+        confidence: Optional[float] = None,
+        language: str = "und",
     ) -> List[TextChunk]:
         """Split text by sentences/paragraphs into target chunk size."""
-        # Simple whitespace token estimation (~1 word = 1.3 tokens)
-        words = text.split()
-        if not words:
+        if not text.split():
             return []
 
-        # Target words per chunk based on chunk_size tokens (~0.75 words per token)
+        # Preserve the existing word-based size estimate across English and Arabic.
         target_words = int(self.chunk_size * 0.75)
-        overlap_words = int(self.chunk_overlap * 0.75)
+        target_words = max(1, target_words)
+        overlap_words = min(int(self.chunk_overlap * 0.75), target_words - 1)
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=target_words,
+            chunk_overlap=max(0, overlap_words),
+            length_function=lambda value: len(value.split()),
+        )
+        split_documents = splitter.create_documents([text])
 
         chunks: List[TextChunk] = []
-        idx = 0
         current_idx = start_idx
-
-        while idx < len(words):
-            chunk_words = words[idx : idx + target_words]
-            chunk_text = " ".join(chunk_words).strip()
-
-            if chunk_text:
-                chunk_id = f"{Path(doc.filename).stem}_p{page_number}_c{current_idx}"
-                chunks.append(
-                    TextChunk(
-                        chunk_id=chunk_id,
-                        document_name=doc.filename,
-                        document_title=doc.title,
-                        chunk_index=current_idx,
-                        page_number=page_number,
-                        text=chunk_text,
-                        token_count=int(len(chunk_words) * 1.3),
-                        metadata={
-                            "document_name": doc.filename,
-                            "document_title": doc.title,
-                            "page": page_number,
-                            "chunk_index": current_idx,
-                            **doc.metadata,
-                        },
-                    )
+        search_from = 0
+        for split_document in split_documents:
+            chunk_text = split_document.page_content.strip()
+            if not chunk_text:
+                continue
+            start_index = text.find(chunk_text, search_from)
+            if start_index < 0:
+                start_index = text.find(chunk_text)
+            if start_index >= 0:
+                words = chunk_text.split()
+                overlap_text = " ".join(words[-overlap_words:]) if overlap_words else ""
+                search_from = start_index + max(
+                    1,
+                    len(chunk_text) - len(overlap_text),
                 )
-                current_idx += 1
-
-            idx += max(1, target_words - overlap_words)
+            chunk_id = f"{Path(doc.filename).stem}_p{page_number}_c{current_idx}"
+            chunk_metadata = dict(doc.metadata)
+            chunk_metadata.update(
+                {
+                    "document_id": doc.document_id,
+                    "content_hash": doc.content_hash,
+                    "file_type": doc.file_type,
+                    "mime_type": doc.mime_type,
+                    "document_name": doc.filename,
+                    "document_title": doc.title,
+                    "page": page_number,
+                    "chunk_index": current_idx,
+                    "section": section,
+                    "sheet_name": sheet_name,
+                    "table_name": table_name,
+                    "language": (
+                        language if language != "und" else doc.language
+                    ),
+                    "extraction_method": extraction_method,
+                }
+            )
+            if confidence is not None:
+                chunk_metadata["confidence"] = confidence
+            if start_index >= 0:
+                chunk_metadata["start_index"] = start_index
+                chunk_metadata["source_end"] = start_index + len(chunk_text)
+            chunks.append(
+                TextChunk(
+                    chunk_id=chunk_id,
+                    document_name=doc.filename,
+                    document_title=doc.title,
+                    chunk_index=current_idx,
+                    page_number=page_number,
+                    text=chunk_text,
+                    token_count=int(len(chunk_text.split()) * 1.3),
+                    metadata=chunk_metadata,
+                )
+            )
+            current_idx += 1
 
         return chunks
 
 
-from pathlib import Path
 chunker = TextChunker()

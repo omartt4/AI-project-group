@@ -8,6 +8,7 @@ Provides:
 """
 
 import streamlit as st
+from collections import Counter
 from graph_rag.chat.chat_service import chat_service
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.graph_builder import graph_builder
@@ -190,11 +191,21 @@ def render_sidebar() -> None:
 
         # System Knowledge Base Status
         doc_count = metadata_manager.get_document_count()
+        language_counts = Counter(
+            record.get("language", "und")
+            for record in metadata_manager.get_all_records()
+            if record.get("language")
+        )
         chunk_count = vector_store.get_total_chunks()
         neo4j_stats = graph_builder.get_graph_stats()
 
         st.markdown("**Knowledge Base Health**")
         st.markdown(f"📄 **{doc_count}** Indexed Papers")
+        if language_counts:
+            st.caption(
+                "Detected languages: "
+                + ", ".join(sorted(language_counts))
+            )
         st.markdown(f"🧩 **{chunk_count}** Vector Chunks")
         if neo4j_stats.get("status") == "online":
             st.markdown(f"🕸️ **{neo4j_stats.get('nodes', 0)}** Total Graph Nodes")
@@ -207,41 +218,72 @@ def render_sidebar() -> None:
         else:
             st.caption("🕸️ Neo4j Graph (Offline)")
 
-        usage = cost_tracker.summary()
-        st.markdown(f"💵 **${usage['cost_usd']:.6f}** Tracked API Cost")
-        st.caption(
-            f"{usage['requests']} successful requests · "
-            f"{usage['total_tokens']:,} tokens"
-        )
-        if usage["unknown_cost_requests"]:
+        try:
+            usage = cost_tracker.summary()
+            st.markdown(f"💵 **${usage['cost_usd']:.8f}** Calculated API Cost")
             st.caption(
-                f"⚠️ {usage['unknown_cost_requests']} request(s) returned tokens "
-                "without a provider cost; the dollar total excludes them."
+                f"{usage['requests']} successful requests · "
+                f"{usage['failed_requests']} failed · "
+                f"{usage['total_tokens']:,} known tokens"
             )
-        if usage["breakdown"]:
-            with st.expander("Cost by operation", expanded=False):
-                for row in usage["breakdown"]:
-                    st.write(
-                        f"{row['role']}: ${float(row['cost_usd']):.6f} "
-                        f"· {int(row['requests'])} requests "
-                        f"· {int(row['total_tokens']):,} tokens"
-                    )
-                    if int(row["unknown_cost_requests"]):
-                        st.caption(
-                            f"{int(row['unknown_cost_requests'])} {row['role']} "
-                            "request(s) have unknown cost"
+            if usage["unknown_cost_requests"]:
+                st.caption(
+                    f"⚠️ {usage['unknown_cost_requests']} request(s) have unknown "
+                    "cost because their model rate or token usage is unavailable."
+                )
+            if usage["unknown_token_requests"]:
+                st.caption(
+                    f"⚠️ Token usage is unavailable for "
+                    f"{usage['unknown_token_requests']} request(s)."
+                )
+            if usage["breakdown"]:
+                with st.expander("Cost by operation", expanded=False):
+                    for row in usage["breakdown"]:
+                        cost_label = (
+                            f"${float(row['cost_usd']):.6f}"
+                            if row["cost_usd"] is not None
+                            else "cost unknown"
                         )
-                st.caption("Recent successful requests")
-                for row in cost_tracker.recent(limit=8):
-                    cost_label = (
-                        f"${float(row['cost_usd']):.6f}"
-                        if row["cost_usd"] is not None
-                        else "cost unknown"
-                    )
-                    st.write(
-                        f"{row['role']} · {row['model']} · "
-                        f"{int(row['total_tokens']):,} tokens · {cost_label}"
-                    )
+                        st.write(
+                            f"{row['role']}: {cost_label} "
+                            f"· {int(row['requests'])} successful requests "
+                            f"· {int(row['failed_requests'])} failed "
+                            f"· {int(row['total_tokens'] or 0):,} known tokens"
+                        )
+                        if int(row["unknown_cost_requests"]):
+                            st.caption(
+                                f"{int(row['unknown_cost_requests'])} {row['role']} "
+                                "request(s) have unknown cost"
+                            )
+                    st.caption("Recent model requests")
+                    for row in cost_tracker.recent(limit=8):
+                        cost_label = (
+                            f"${float(row['cost_usd']):.6f}"
+                            if row["cost_usd"] is not None
+                            else "cost unknown"
+                        )
+                        token_label = (
+                            f"{int(row['total_tokens']):,} tokens"
+                            if row["total_tokens"] is not None
+                            else "tokens unknown"
+                        )
+                        provider_cost_label = (
+                            f" · provider ${float(row['provider_cost_usd']):.8f}"
+                            if row["provider_cost_usd"] is not None
+                            else ""
+                        )
+                        st.write(
+                            f"{row['role']} · {row['model']} · "
+                            f"{row['status']} · {token_label} · "
+                            f"calculated {cost_label} ({row['cost_method']})"
+                            f"{provider_cost_label} · "
+                            f"cache {row['cache_status']} · "
+                            f"run {row['run_id'] or '-'} · request {row['request_id']}"
+                        )
+                        if row["error_message"]:
+                            st.caption(row["error_message"])
+        except Exception as exc:
+            st.error(f"Could not load model usage data: {exc}")
 
         st.divider()
 

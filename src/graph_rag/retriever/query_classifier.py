@@ -49,6 +49,7 @@ class QueryClassifier:
     COMPARISON_PATTERNS = [
         r"\b(?:compare|comparison|versus|vs\.?|difference\s+between|distinction|pros\s+and\s+cons)\b",
         r"\b(?:better\s+than|worse\s+than|advantages?\s+of\s+.+\s+over)\b",
+        r"(?:قارن|مقارنة|الفرق\s+بين|مقابل|ضد)",
     ]
 
     SUMMARIZATION_PATTERNS = [
@@ -62,6 +63,7 @@ class QueryClassifier:
         r"\bthroughout\s+the\s+(?:knowledge\s+base|corpus|dataset|documents?)\b",
         r"\bwhat\s+does\s+the\s+(?:corpus|knowledge\s+base)\s+say\b",
         r"\bin\s+all\s+(?:the\s+)?(?:papers?|documents?|files?)\b",
+        r"(?:لخص|تلخيص|ملخص|نظرة\s+عامة|جميع\s+(?:الأوراق|الوثائق|الملفات))",
     ]
 
     RELATIONAL_PATTERNS = [
@@ -73,6 +75,7 @@ class QueryClassifier:
         r"\bhow\s+(?:does|do)\s+.+\s+relate\s+to\b",
         r"\bhow\s+are\s+.+\s+(?:connected|linked|related)\b",
         r"\bwhat\s+(?:is|are)\s+the\s+(?:link|connection|relationship)\s+between\b",
+        r"(?:العلاقة\s+بين|ما\s+العلاقة|ارتباط\s+بين|من\s+اقترح|من\s+استخدم)",
     ]
 
     FACTUAL_PATTERNS = [
@@ -86,6 +89,7 @@ class QueryClassifier:
         r"\bwhat\s+are\s+(?!the\s+(?:modern|current|main|key|best|latest|common|various|different|major|top|primary|leading|popular|existing|available|typical|recent|important|significant|general|basic|advanced|new|emerging))\b",
         # C-3: Enumeration/category questions treated as factual
         r"\b(?:types?\s+of|kinds?\s+of|categories?\s+of|forms?\s+of|variants?\s+of)\b",
+        r"(?:ما\s+هو|ما\s+هي|ما\s+معنى|تعريف|متى|أين)",
     ]
 
     CONVERSATIONAL_PATTERNS = [
@@ -93,6 +97,7 @@ class QueryClassifier:
         r"\b(?:hi|hello|hey|greetings|good\s+morning|good\s+evening|good\s+afternoon)(?:\s+(?:there|all|team|assistant|bot|friend))?\b",
         r"\b(?:thanks|thank\s+you|thx|cheers|bye|goodbye|see\s+you)\b",
         r"^(?:who\s+are\s+you|what\s+can\s+you\s+do|how\s+are\s+you|help|how\s+do\s+you\s+work)[\s!?.]*$",
+        r"(?:مرحبا|مرحباً|أهلا|أهلًا|السلام\s+عليكم|شكرا|شكرًا|مع\s+السلامة)",
     ]
 
     # C-7: Expanded stop words — include RAG meta-words that pollute entity extraction
@@ -108,6 +113,9 @@ class QueryClassifier:
         "across", "throughout", "research", "knowledge", "base", "corpus",
         "approach", "approaches", "method", "methods", "technique", "techniques",
         "main", "key", "important", "various", "different", "general",
+        "ما", "ماذا", "كيف", "من", "في", "على", "عن", "الى", "إلى",
+        "هذا", "هذه", "هل", "هو", "هي", "الذي", "التي", "مع", "بين",
+        "ماهو", "ماهي", "كل", "جميع", "عن",
     }
 
     def classify(self, query: str) -> QueryClassification:
@@ -239,7 +247,7 @@ class QueryClassifier:
                 entities.append(term)
 
         # 3. Significant alphanumeric words (> 3 chars not in stop words)
-        words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query)
+        words = re.findall(r"\b[\w-]{3,}\b", query, flags=re.UNICODE)
         for w in words:
             w_clean = w.strip()
             # C-7: Normalize to lowercase for stop word check

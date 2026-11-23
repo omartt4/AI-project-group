@@ -1,85 +1,127 @@
-# Graph Knowledge Building — Schema v2
+# Automatic Document Graph Building
 
-The redesigned ingestion pipeline builds an evidence-first graph for the
-current corpus. It does not reuse the old Neo4j graph or old embedding vectors.
+The ingestion pipeline treats the source as a generic document, not necessarily
+an academic paper. Normal operation is: add supported files to the configured
+`pdfs/` folder, run ingestion, then optionally inspect the graph and diagnostics.
+Entity, relationship, type, topic, alias, and duplicate decisions are automatic.
 
-## Graph hierarchy
+## Ingestion and extraction
 
 ```text
-(TopLevelTopic)-[:HAS_SUBTOPIC]->(Subtopic)
-(TopLevelTopic|Subtopic)-[:HAS_PAPER]->(Paper)-[:HAS_CHUNK]->(Chunk)
-(Chunk)-[:CONTAINS_MENTION]->(Mention)-[:REFERS_TO]->(Entity)
+Document
+  -> format-aware parsing and OCR when needed
+  -> language detection and source-structure filtering
+  -> spaCy candidate analysis
+  -> LangChain LLMGraphTransformer (open schema)
+  -> exact-evidence and confidence validation
+  -> type normalization and entity resolution
+  -> topic hierarchy and diagnostics
+  -> ChromaDB and Neo4j writes
+  -> versioned extraction cache and usage/cost logs
 ```
 
-`Paper` is the document identity. `Chunk` provides retrieval granularity.
-`Mention` is the exact text phrase, while `Entity` is the canonical object that
-one or more mentions refer to.
+spaCy supplies sentence boundaries, tokens, built-in NER, dependencies, and
+optional noun-phrase candidates. These are hints only: raw spaCy output is never
+written to Neo4j. The primary graph extractor is LangChain's
+`LLMGraphTransformer` from `langchain-neo4j`, configured with
+`allowed_nodes=[]` and `allowed_relationships=[]`. Entity and relationship
+types remain open; the model can return novel labels when the source supports
+them.
 
-For example, "Ahmed", "he", and "the director" can be three mentions that all
-refer to one `Person` entity. Ambiguous mentions remain unresolved rather than
-creating a false person.
+Documents are parsed by format-aware handlers, with OCR for scanned pages and
+image inputs. Language and page/table/section provenance are retained.
+Repeated headers and footers, reference sections, and boilerplate are removed
+before graph extraction. The full document is sent in one extraction request
+unless it exceeds the configured model context budget; only then is it split
+into source regions.
 
-## Semantic relations
+Every accepted entity and relationship must include an exact source quote,
+source region, and sufficient confidence. Unsupported statements, sentence-
+length names, citation artifacts, unresolved pronouns, missing relationship
+endpoints, and low-confidence candidates are rejected. Rejections and
+ambiguous cases are recorded as diagnostics and do not require routine manual
+approval.
 
-Allowed relations are controlled in application code:
+## Identity and topic handling
 
-- `AUTHORED`
-- `AFFILIATED_WITH`
-- `HOLDS_ROLE`
-- `PROPOSES`
-- `EVALUATES_ON`
-- `USES_METHOD`
-- `PART_OF_TOPIC`
-- `REPORTS`
-- `RELATED_TO`
+Entity types are normalized against the existing graph vocabulary, with
+evidence-aware common synonyms and semantic matching when an embedding model is
+configured. New valid types remain accepted. Entity resolution checks names,
+aliases, abbreviations, roles, organizations, graph context, and semantic
+similarity. Semantic matches require a high score and a clear margin over other
+candidates. If identity remains ambiguous, the candidate and dependent
+relationships are omitted from the confident graph and stored in
+`extraction_diagnostics`.
 
-Every relation stores the source `paper_id`, `chunk_id`, evidence text,
-confidence, dataset ID, and extraction version. Model-generated relationship
-types outside the whitelist are rejected before a Cypher query is built.
+Topics are open-schema proposals grounded in source evidence and confidence.
+The pipeline discovers new topics and parents, merges explicit aliases and
+unambiguous near-duplicates, and rejects generic section headings or topic names
+that duplicate extracted entities. Ambiguous topic matches are diagnostics, not
+new confident duplicates. No fixed topic list or manual candidate approval is
+required.
 
-## Entity resolution
+## Storage schema
 
-Chunks are processed in paper order. Before extracting a later chunk, the model
-receives a compact registry of entities already found in that paper. It must
-reuse an existing entity ID for pronouns, aliases, and role descriptions when
-the context is clear.
+```text
+(Document)-[:HAS_ENTITY_EVIDENCE]->(Entity)
+(Entity)-[:RELATION {
+  relation_type, document_id, evidence, confidence, provenance
+}]->(Entity)
+(TopLevelTopic)-[:HAS_SUBTOPIC]->(Subtopic)
+(Topic)-[:HAS_DOCUMENT]->(Document)
+```
 
-Methods, datasets, topics, metrics, and tasks use stable normalized identities.
-Potentially ambiguous people, organizations, and findings remain paper-scoped
-until stronger cross-paper evidence is available. This avoids merging two
-people merely because they share a name.
+Neo4j stores documents, canonical entities, topics, and generic evidence-backed
+relationships. It does not create `Chunk` or `Mention` nodes. Text chunks and
+their embeddings, plus canonical-entity vectors for resolution, live in
+ChromaDB. SQLite `graph_evidence` records preserve entity, relationship, topic,
+and resolved-mention text, evidence, source document, page/section, confidence,
+and provenance. Ambiguous mentions and other non-blocking cases remain
+available in `unresolved_references` and `extraction_diagnostics`.
 
-## Topic taxonomy
+Structured rows from CSV, Excel, JSON, and Parquet are retained in
+`structured_tables`. Page text, OCR text, offsets, bounding boxes, extraction
+method, confidence, and language are retained in `document_pages`.
 
-The initial active topics are:
+## Cache, idempotency, and rebuilds
 
-- Machine Learning
-- Computer Vision
-- Natural Language Processing
+Extraction cache signatures include document content hash, extraction model,
+prompt version, pipeline version, and normalization version. Renaming unchanged
+content does not trigger duplicate ingestion. New or changed documents are
+processed independently. A per-document cross-process lock prevents concurrent
+duplicate extraction.
 
-Known aliases such as `ML`, `CV`, and `NLP` map deterministically to their
-canonical `TopLevelTopic`. Specialist areas become `Subtopic` nodes connected
-to their parent by `HAS_SUBTOPIC`. A genuinely new domain is created as a
-candidate top-level topic and can later be reviewed and promoted. Papers and
-subtopics may connect to multiple top-level topics.
+```powershell
+uv run python scripts\ingest.py
+uv run python scripts\ingest.py --file "report.pdf" --rebuild-graph
+```
 
-## Cloud models and vector versioning
+`--rebuild-graph` requires a complete compatible extraction cache and does not
+call the extraction model. An incomplete or stale cache fails clearly instead
+of falling back to a paid extraction request. Use `--refresh-extraction` only
+when a fresh model extraction is intentionally desired.
 
-Generation and embeddings use configurable OpenRouter endpoints. Credentials
-and exact model IDs live only in `.env`.
+## Usage and cost accounting
 
-Changing the embedding model or its dimensions requires a new ChromaDB
-collection. Schema v2 defaults to `research_papers_graph_v2`; vectors from the
-previous local model are never mixed with the new cloud vectors.
+Each external model request is logged with operation, model, input/output/total
+tokens when provided, provider-reported cost, locally estimated cost, latency,
+retry count, success/failure, cache status, and request/run identifiers. Cost
+is calculated locally from the versioned rate card:
 
-## Fresh-corpus workflow
+```text
+cost = (input_tokens * input_USD_per_million
+      + output_tokens * output_USD_per_million) / 1,000,000
+```
 
-1. Configure the new Neo4j instance in `.env`.
-2. Place only the new corpus in `pdfs/`.
-3. Start with a fresh `metadata.csv` for that corpus.
-4. Configure chat and embedding model IDs.
-5. Run ingestion on three to five papers first.
-6. Inspect topic assignments, unresolved mentions, duplicate entities, and
-   evidence quality before ingesting the full corpus.
+No model is asked to calculate cost. If token usage or a rate is unavailable,
+the estimated cost is explicitly unknown; it is not silently treated as zero.
+Provider-reported cost is retained separately for comparison. See
+`src/graph_rag/llm/pricing.py` and the rate-card references in `README.md`.
+Neo4j hosting, local compute, and storage costs are outside this request-level
+tracker.
 
-See `GRAPH_REDESIGN_PLAN.md` for the rollout and design decisions.
+## Safe validation
+
+Tests use mocked model responses and local temporary storage. Do not run
+production ingestion, paid model calls, database deletion, or graph rebuilds
+without explicit approval.

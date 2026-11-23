@@ -15,6 +15,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from langchain_core.runnables import RunnableLambda, RunnableParallel
+
+from graph_rag.config import settings
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.concept_discovery import (
     ConceptDiscoveryResult,
@@ -90,41 +93,24 @@ class HybridRetriever:
                 unique_papers_count=0,
             )
 
-        # 2. Diversity-Aware Vector Retrieval (MMR)
-        diverse_chunks: List[Dict[str, Any]] = []
-        try:
-            diverse_chunks = self.diversity_retriever.retrieve_diverse(
-                query=query,
-                k=qc.recommended_k,
-                candidate_k=qc.candidate_pool_size,
-                mmr_lambda=qc.mmr_lambda,
-            )
-        except Exception as e:
-            logger.warning(f"Diversity vector retrieval failed: {e}. Falling back to baseline search.")
-            try:
-                diverse_chunks = self.vector_db.search(query=query, n_results=qc.recommended_k)
-            except Exception as e_base:
-                logger.error(f"Fallback vector search failed: {e_base}")
-
-        # 3. Graph-based Concept Discovery
-        discovery_res = ConceptDiscoveryResult()
-        try:
-            # Gather search keywords from extracted entities + query terms
-            search_keywords = list(qc.extracted_entities)
-            if not search_keywords:
-                search_keywords = [
-                    w for w in re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query)
-                    if w.lower() not in {"what", "when", "where", "which", "explain", "describe", "show", "tell", "paper", "research"}
-                ]
-
-            discovery_res = self.concept_engine.discover(
-                keywords=search_keywords,
-                comparison_targets=qc.comparison_targets,
-                max_depth=qc.graph_depth,
-                limit=qc.graph_limit,
-            )
-        except Exception as e:
-            logger.warning(f"Graph concept discovery failed: {e}")
+        retrieval_tasks = RunnableParallel(
+            vectors=RunnableLambda(
+                lambda _: self._retrieve_vectors(query, qc)
+            ),
+            graph=RunnableLambda(
+                lambda _: self._discover_graph(query, qc)
+            ),
+        )
+        task_results = retrieval_tasks.invoke(
+            {},
+            config={
+                "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
+                "run_name": "hybrid-retrieval",
+                "metadata": {"intent": qc.query_class.value},
+            },
+        )
+        diverse_chunks = task_results["vectors"]
+        discovery_res = task_results["graph"]
 
         # 4. Evidence Aggregation & Thematic Structuring
         evidence = self.aggregator.aggregate(
@@ -151,6 +137,55 @@ class HybridRetriever:
             unique_papers_count=evidence.unique_papers_count,
             evidence=evidence,
         )
+
+    def _retrieve_vectors(
+        self,
+        query: str,
+        classification: QueryClassification,
+    ) -> List[Dict[str, Any]]:
+        try:
+            return self.diversity_retriever.retrieve_diverse(
+                query=query,
+                k=classification.recommended_k,
+                candidate_k=classification.candidate_pool_size,
+                mmr_lambda=classification.mmr_lambda,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Diversity vector retrieval failed: %s. Falling back to baseline search.",
+                exc,
+            )
+            try:
+                return self.vector_db.search(
+                    query=query,
+                    n_results=classification.recommended_k,
+                )
+            except Exception:
+                logger.exception("Fallback vector search failed")
+                return []
+
+    def _discover_graph(
+        self,
+        query: str,
+        classification: QueryClassification,
+    ) -> ConceptDiscoveryResult:
+        search_keywords = list(classification.extracted_entities)
+        if not search_keywords:
+            search_keywords = [
+                word
+                for word in re.findall(r"\b[\w-]{3,}\b", query, flags=re.UNICODE)
+                if word.casefold() not in self.classifier.STOP_WORDS
+            ]
+        try:
+            return self.concept_engine.discover(
+                keywords=search_keywords,
+                comparison_targets=classification.comparison_targets,
+                max_depth=classification.graph_depth,
+                limit=classification.graph_limit,
+            )
+        except Exception:
+            logger.exception("Graph concept discovery failed")
+            return ConceptDiscoveryResult()
 
     def retrieve(self, query: str, top_k: int = 5) -> RetrievedContext:
         """

@@ -9,8 +9,9 @@ Implements LLM-as-a-Judge evaluators for:
 
 import json
 import logging
+import math
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from graph_rag.llm.model_client import evaluation_model_client
 
 logger = logging.getLogger(__name__)
@@ -80,35 +81,45 @@ Respond ONLY with valid JSON:
 """
 
 
-def _parse_judge_response(raw: str, default_score: float = 0.8) -> Tuple[float, str]:
+def _parse_judge_response(
+    raw: str,
+    default_score: Optional[float] = None,
+) -> Tuple[Optional[float], str]:
     """Extract score and reasoning from LLM judge response."""
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(0))
-            score = float(data.get("score", default_score))
+            score = float(data["score"])
+            if not math.isfinite(score):
+                raise ValueError("Judge score must be finite")
             score = max(0.0, min(1.0, score))
             reasoning = str(data.get("reasoning", "")).strip()
             return round(score, 2), reasoning
-        except Exception:
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             pass
-    # Fallback regex search for score number
-    num_match = re.search(r"\b(0(\.\d+)?|1(\.0+)?)\b", raw)
-    score = float(num_match.group(0)) if num_match else default_score
-    return round(max(0.0, min(1.0, score)), 2), raw[:200]
+    if default_score is not None:
+        num_match = re.search(r"\b(0(\.\d+)?|1(\.0+)?)\b", raw)
+        score = float(num_match.group(0)) if num_match else default_score
+        return round(max(0.0, min(1.0, score)), 2), raw[:200]
+    return None, "Evaluation response could not be parsed"
 
 
-def evaluate_all_metrics(question: str, answer: str, context: str) -> dict:
+def evaluate_all_metrics(
+    question: str,
+    answer: str,
+    context: str,
+) -> dict[str, Tuple[Optional[float], str]]:
     """Evaluate all three metrics in a single paid model request."""
     prompt = COMBINED_EVALUATION_PROMPT.format(
         question=question,
         answer=answer,
         context=context[:3500],
     )
-    defaults = {
-        "faithfulness": (0.85, "Evaluation unavailable"),
-        "answer_relevance": (0.85, "Evaluation unavailable"),
-        "context_relevance": (0.80, "Evaluation unavailable"),
+    unavailable = {
+        "faithfulness": (None, "Evaluation unavailable"),
+        "answer_relevance": (None, "Evaluation unavailable"),
+        "context_relevance": (None, "Evaluation unavailable"),
     }
     try:
         raw = evaluation_model_client.generate(
@@ -118,48 +129,70 @@ def evaluate_all_metrics(question: str, answer: str, context: str) -> dict:
         )
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         data = json.loads(match.group(0)) if match else {}
+        if not isinstance(data, dict):
+            raise ValueError("Combined evaluation response must be a JSON object")
         result = {}
-        for name, default in defaults.items():
-            row = data.get(name) if isinstance(data, dict) else None
+        for name in unavailable:
+            row = data.get(name)
             if not isinstance(row, dict):
-                result[name] = default
+                result[name] = unavailable[name]
                 continue
-            score = max(0.0, min(1.0, float(row.get("score", default[0]))))
-            result[name] = (round(score, 2), str(row.get("reasoning", default[1])))
+            try:
+                score = float(row["score"])
+                if not math.isfinite(score):
+                    raise ValueError("Judge score must be finite")
+            except (KeyError, TypeError, ValueError):
+                result[name] = unavailable[name]
+                continue
+            score = max(0.0, min(1.0, score))
+            result[name] = (
+                round(score, 2),
+                str(row.get("reasoning", "Evaluation reasoning unavailable")),
+            )
         return result
     except Exception as exc:
         logger.warning("Combined evaluation failed: %s", exc)
-        return defaults
+        return unavailable
 
 
-def evaluate_faithfulness(question: str, answer: str, context: str) -> Tuple[float, str]:
+def evaluate_faithfulness(
+    question: str,
+    answer: str,
+    context: str,
+) -> Tuple[Optional[float], str]:
     """Score faithfulness (grounding) of the answer against context."""
     prompt = FAITHFULNESS_PROMPT.format(question=question, answer=answer, context=context[:2500])
     try:
         raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
-        return _parse_judge_response(raw, default_score=0.9)
+        return _parse_judge_response(raw)
     except Exception as e:
         logger.warning(f"Faithfulness eval failed: {e}")
-        return 0.85, "Evaluation heuristic default"
+        return None, "Evaluation unavailable"
 
 
-def evaluate_answer_relevance(question: str, answer: str) -> Tuple[float, str]:
+def evaluate_answer_relevance(
+    question: str,
+    answer: str,
+) -> Tuple[Optional[float], str]:
     """Score answer relevance to the user question."""
     prompt = ANSWER_RELEVANCE_PROMPT.format(question=question, answer=answer)
     try:
         raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
-        return _parse_judge_response(raw, default_score=0.9)
+        return _parse_judge_response(raw)
     except Exception as e:
         logger.warning(f"Answer relevance eval failed: {e}")
-        return 0.85, "Evaluation heuristic default"
+        return None, "Evaluation unavailable"
 
 
-def evaluate_context_relevance(question: str, context: str) -> Tuple[float, str]:
+def evaluate_context_relevance(
+    question: str,
+    context: str,
+) -> Tuple[Optional[float], str]:
     """Score relevance of retrieved context to the question."""
     prompt = CONTEXT_RELEVANCE_PROMPT.format(question=question, context=context[:2500])
     try:
         raw = evaluation_model_client.generate(prompt=prompt, system_prompt="You are a strict JSON evaluation judge.", temperature=0.0)
-        return _parse_judge_response(raw, default_score=0.85)
+        return _parse_judge_response(raw)
     except Exception as e:
         logger.warning(f"Context relevance eval failed: {e}")
-        return 0.80, "Evaluation heuristic default"
+        return None, "Evaluation unavailable"

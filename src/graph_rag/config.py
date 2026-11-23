@@ -42,6 +42,9 @@ class Settings:
     EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "0"))
     MODEL_TIMEOUT_SECONDS: float = float(os.getenv("MODEL_TIMEOUT_SECONDS", "120.0"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "2"))
+    LANGCHAIN_MAX_CONCURRENCY: int = int(
+        os.getenv("LANGCHAIN_MAX_CONCURRENCY", "4")
+    )
     OPENROUTER_SITE_URL: str = os.getenv("OPENROUTER_SITE_URL", "")
     OPENROUTER_APP_NAME: str = os.getenv("OPENROUTER_APP_NAME", "Graph RAG Studio")
 
@@ -73,10 +76,30 @@ class Settings:
     GRAPH_EXTRACTION_MAX_CHARS: int = int(
         os.getenv("GRAPH_EXTRACTION_MAX_CHARS", "14000")
     )
+    EXTRACTION_CONTEXT_TOKENS: int = int(
+        os.getenv("EXTRACTION_CONTEXT_TOKENS", "131072")
+    )
+    EXTRACTION_OUTPUT_TOKENS: int = int(
+        os.getenv("EXTRACTION_OUTPUT_TOKENS", "8192")
+    )
+    EXTRACTION_MIN_CONFIDENCE: float = float(
+        os.getenv("EXTRACTION_MIN_CONFIDENCE", "0.65")
+    )
+    TOPIC_MIN_CONFIDENCE: float = float(
+        os.getenv("TOPIC_MIN_CONFIDENCE", "0.80")
+    )
+    OCR_DPI: int = int(os.getenv("OCR_DPI", "200"))
+    OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "eng+ara")
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
-    GRAPH_SCHEMA_VERSION: str = os.getenv("GRAPH_SCHEMA_VERSION", "3")
+    GRAPH_SCHEMA_VERSION: str = os.getenv("GRAPH_SCHEMA_VERSION", "4")
     EXTRACTION_VERSION: str = os.getenv(
-        "EXTRACTION_VERSION", "graph-v3-paper-level"
+        "EXTRACTION_VERSION", "document-open-graph-v6"
+    )
+    EXTRACTION_PROMPT_VERSION: str = os.getenv(
+        "EXTRACTION_PROMPT_VERSION", "open-schema-document-v1"
+    )
+    NORMALIZATION_VERSION: str = os.getenv(
+        "NORMALIZATION_VERSION", "open-normalization-v2"
     )
     DATASET_ID: str = os.getenv("DATASET_ID", "research-v2")
 
@@ -96,6 +119,8 @@ class Settings:
 
     def ensure_directories(self) -> None:
         """Create required runtime directories if they don't exist."""
+        if self.LANGCHAIN_MAX_CONCURRENCY < 1:
+            raise ValueError("LANGCHAIN_MAX_CONCURRENCY must be at least 1")
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
         self.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)

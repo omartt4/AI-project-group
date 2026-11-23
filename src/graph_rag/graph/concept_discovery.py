@@ -155,7 +155,8 @@ class ConceptDiscoveryEngine:
             neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
         )
         RETURN e.name AS e_name, e.category AS e_cat, e.description AS e_desc,
-               type(r) AS rel, coalesce(neighbor.name, neighbor.title) AS n_name,
+               coalesce(r.relation_type, type(r)) AS rel,
+               coalesce(neighbor.name, neighbor.title) AS n_name,
                CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS n_cat,
                neighbor.description AS n_desc
         LIMIT $limit
@@ -221,8 +222,8 @@ class ConceptDiscoveryEngine:
         WHERE bridge.dataset_id = $dataset_id
         RETURN DISTINCT bridge.name AS bridge_name, bridge.category AS bridge_cat,
                         bridge.description AS bridge_desc,
-                        a.name AS a_name, type(r1) AS r1_type,
-                        b.name AS b_name, type(r2) AS r2_type
+                        a.name AS a_name, coalesce(r1.relation_type, type(r1)) AS r1_type,
+                        b.name AS b_name, coalesce(r2.relation_type, type(r2)) AS r2_type
         LIMIT $limit
         """
         records = session.run(
