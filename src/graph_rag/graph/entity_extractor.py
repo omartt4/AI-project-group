@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -87,8 +88,23 @@ class GraphExtractionResult:
     relations: List[ExtractedRelation] = field(default_factory=list)
     topics: List["ExtractedTopic"] = field(default_factory=list)
     diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    model_responses: List[Dict[str, Any]] = field(default_factory=list)
+    cache_metadata: Dict[str, Any] = field(default_factory=dict)
     document_type: str = "unknown"
     cache_stage: str = "ready"
+
+
+class GraphExtractionError(RuntimeError):
+    """Extraction failure that retains any provider responses for diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model_responses: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.model_responses = model_responses or []
 
 
 @dataclass
@@ -276,9 +292,57 @@ def _grounded(evidence: str, source_text: Optional[str]) -> bool:
         return False
     if source_text is None:
         return True
-    normalized_evidence = " ".join(evidence.casefold().split())
-    normalized_source = " ".join(source_text.casefold().split())
+    normalized_evidence, _, _ = _normalize_evidence_text(evidence)
+    normalized_source, _, _ = _normalize_evidence_text(source_text)
     return normalized_evidence in normalized_source
+
+
+def _normalize_evidence_text(text: str) -> tuple[str, List[int], List[int]]:
+    """Normalize Arabic spelling variants while mapping matches to original offsets."""
+    normalized: List[str] = []
+    source_starts: List[int] = []
+    source_ends: List[int] = []
+
+    for source_index, character in enumerate(text):
+        for value in unicodedata.normalize("NFKC", character):
+            codepoint = ord(value)
+            is_arabic_mark = (
+                0x064B <= codepoint <= 0x065F
+                or codepoint == 0x0670
+                or 0x06D6 <= codepoint <= 0x06ED
+                or 0x08D3 <= codepoint <= 0x08FF
+            )
+            if value == "\u0640" or is_arabic_mark:
+                if source_ends:
+                    source_ends[-1] = source_index + 1
+                continue
+
+            if value in {"أ", "إ", "آ", "ٱ"}:
+                value = "ا"
+            elif value == "ى":
+                value = "ي"
+
+            if value.isspace():
+                if not normalized:
+                    continue
+                if normalized[-1] == " ":
+                    source_ends[-1] = source_index + 1
+                else:
+                    normalized.append(" ")
+                    source_starts.append(source_index)
+                    source_ends.append(source_index + 1)
+                continue
+
+            for folded in value.casefold():
+                normalized.append(folded)
+                source_starts.append(source_index)
+                source_ends.append(source_index + 1)
+
+    while normalized and normalized[-1] == " ":
+        normalized.pop()
+        source_starts.pop()
+        source_ends.pop()
+    return "".join(normalized), source_starts, source_ends
 
 
 _REJECTED_NAME_PATTERNS = (
@@ -364,24 +428,61 @@ class EntityExtractor:
         source_ref: str,
         evidence: str,
     ) -> tuple[Any, Optional[tuple[int, int]]]:
+        block, span, _ = EntityExtractor._source_match_details(
+            document,
+            source_ref,
+            evidence,
+        )
+        return block, span
+
+    @staticmethod
+    def _source_match_details(
+        document: StructuredDocumentInput,
+        source_ref: str,
+        evidence: str,
+    ) -> tuple[Any, Optional[tuple[int, int]], str]:
         if not evidence.strip():
-            return None, None
+            return None, None, "missing_evidence"
+        normalized_evidence, _, _ = _normalize_evidence_text(evidence)
+        if not normalized_evidence:
+            return None, None, "missing_evidence"
         candidates = [
             block for block in document.blocks
             if not source_ref or block.source_ref == source_ref
         ]
         if not candidates:
             candidates = document.blocks
-        words = [word for word in re.split(r"\s+", evidence.strip()) if word]
-        pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
         matches = []
         for block in candidates:
-            match = pattern.search(block.text)
-            if match:
-                matches.append((block, match.span()))
+            normalized_source, source_starts, source_ends = _normalize_evidence_text(
+                block.text
+            )
+            search_from = 0
+            while len(matches) < 2:
+                match_start = normalized_source.find(
+                    normalized_evidence,
+                    search_from,
+                )
+                if match_start < 0:
+                    break
+                match_end = match_start + len(normalized_evidence)
+                matches.append(
+                    (
+                        block,
+                        (
+                            source_starts[match_start],
+                            source_ends[match_end - 1],
+                        ),
+                    )
+                )
+                search_from = match_start + 1
+            if len(matches) > 1:
+                break
         if len(matches) == 1:
-            return matches[0]
-        return None, None
+            return matches[0][0], matches[0][1], ""
+        if matches:
+            return None, None, "ambiguous_evidence"
+        return None, None, "evidence_not_found"
 
     @staticmethod
     def _source_provenance(
@@ -414,6 +515,24 @@ class EntityExtractor:
             "extraction_model": settings.EXTRACTION_MODEL,
             "extraction_version": settings.EXTRACTION_VERSION,
         }
+
+    @staticmethod
+    def _model_response_records(
+        callback: ModelUsageCallbackHandler,
+        document: StructuredDocumentInput,
+        rendered: str,
+    ) -> List[Dict[str, Any]]:
+        return [
+            {
+                **record,
+                "language": document.language,
+                "source_refs": [block.source_ref for block in document.blocks],
+                "input_characters": len(rendered),
+                "configured_context_tokens": settings.EXTRACTION_CONTEXT_TOKENS,
+                "configured_output_tokens": settings.EXTRACTION_OUTPUT_TOKENS,
+            }
+            for record in callback.response_records
+        ]
 
     def extract_document(
         self,
@@ -455,16 +574,38 @@ class EntityExtractor:
                 },
             )
         except Exception as exc:
+            response_records = self._model_response_records(
+                usage_callback,
+                document,
+                rendered,
+            )
             logger.error(
                 "Document graph extraction failed for %s: %s",
                 document.document_id,
                 exc,
             )
-            raise RuntimeError(
-                f"Graph extraction failed for document {document.document_id}: {exc}"
+            raise GraphExtractionError(
+                f"Graph extraction failed for document {document.document_id}: {exc}",
+                model_responses=response_records,
             ) from exc
 
         result = GraphExtractionResult(document_type=document.document_type)
+        result.model_responses = self._model_response_records(
+            usage_callback,
+            document,
+            rendered,
+        )
+        result.diagnostics.extend(
+            {
+                "diagnostic_type": "truncated_model_output",
+                "finish_reason": response.get("finish_reason"),
+                "request_id": response.get("request_id"),
+                "source_refs": response.get("source_refs", []),
+                "usage": response.get("usage", {}),
+            }
+            for response in result.model_responses
+            if response.get("truncated") is True
+        )
         nodes: Dict[tuple[str, str], Any] = {}
         entity_ids: Dict[tuple[str, str], str] = {}
         topic_ids: Dict[tuple[str, str], str] = {}
@@ -485,14 +626,26 @@ class EntityExtractor:
             evidence = str(properties.get("evidence") or "").strip()
             source_ref = str(properties.get("source_ref") or "").strip()
             confidence = _confidence(properties.get("confidence"))
-            block, span = self._source_match(document, source_ref, evidence)
+            block, span, evidence_reason = self._source_match_details(
+                document,
+                source_ref,
+                evidence,
+            )
+            rejection_reasons = []
+            if not name:
+                rejection_reasons.append("missing_name")
+            if not _valid_entity_name(name, node_type):
+                rejection_reasons.append("invalid_entity_name")
+            if not evidence:
+                rejection_reasons.append("missing_evidence")
+            elif evidence_reason:
+                rejection_reasons.append(evidence_reason)
+            if confidence < settings.EXTRACTION_MIN_CONFIDENCE:
+                rejection_reasons.append("low_confidence")
             if (
-                not name
-                or not _valid_entity_name(name, node_type)
-                or not evidence
+                rejection_reasons
                 or not block
                 or span is None
-                or confidence < settings.EXTRACTION_MIN_CONFIDENCE
             ):
                 result.diagnostics.append(
                     {
@@ -502,10 +655,12 @@ class EntityExtractor:
                         "evidence": evidence,
                         "source_ref": source_ref,
                         "confidence": confidence,
+                        "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
                     }
                 )
                 continue
 
+            source_evidence = block.text[span[0]:span[1]]
             provenance = self._source_provenance(document, block, span)
             key = (node.id, node_type.casefold())
             nodes[key] = node
@@ -517,7 +672,7 @@ class EntityExtractor:
                     ExtractedTopic(
                         name=name,
                         aliases=[str(value) for value in aliases if str(value).strip()],
-                        evidence=evidence,
+                        evidence=source_evidence,
                         confidence=confidence,
                         source_ref=source_ref,
                         provenance=provenance,
@@ -549,7 +704,7 @@ class EntityExtractor:
                 description=str(properties.get("description") or ""),
                 aliases=[str(value) for value in aliases if str(value).strip()],
                 attributes={str(key): str(value) for key, value in attributes.items()},
-                evidence=evidence,
+                evidence=source_evidence,
                 confidence=confidence,
                 source_ref=source_ref,
                 provenance=provenance,
@@ -566,18 +721,41 @@ class EntityExtractor:
                         continue
                     mention_evidence = str(mention.get("evidence") or "").strip()
                     mention_ref = str(mention.get("source_ref") or source_ref)
-                    mention_block, mention_span = self._source_match(
+                    mention_block, mention_span, mention_reason = self._source_match_details(
                         document,
                         mention_ref,
                         mention_evidence,
                     )
                     mention_confidence = _confidence(mention.get("confidence"))
+                    mention_reasons = []
+                    if not mention_evidence:
+                        mention_reasons.append("missing_evidence")
+                    elif mention_reason:
+                        mention_reasons.append(mention_reason)
+                    if mention_confidence < settings.EXTRACTION_MIN_CONFIDENCE:
+                        mention_reasons.append("low_confidence")
                     if (
-                        not mention_block
+                        mention_reasons
+                        or not mention_block
                         or mention_span is None
-                        or mention_confidence < settings.EXTRACTION_MIN_CONFIDENCE
                     ):
+                        result.diagnostics.append(
+                            {
+                                "diagnostic_type": "rejected_mention",
+                                "text": str(mention.get("text") or "").strip(),
+                                "entity_name": name,
+                                "evidence": mention_evidence,
+                                "source_ref": mention_ref,
+                                "confidence": mention_confidence,
+                                "rejection_reasons": list(
+                                    dict.fromkeys(mention_reasons)
+                                ),
+                            }
+                        )
                         continue
+                    mention_source_evidence = mention_block.text[
+                        mention_span[0]:mention_span[1]
+                    ]
                     result.mentions.append(
                         ExtractedMention(
                             text=str(mention.get("text") or "").strip(),
@@ -585,7 +763,7 @@ class EntityExtractor:
                             entity_category=node_type,
                             entity_id=name,
                             mention_type=str(mention.get("mention_type") or "name"),
-                            evidence=mention_evidence,
+                            evidence=mention_source_evidence,
                             confidence=mention_confidence,
                             source_ref=mention_ref,
                             provenance=self._source_provenance(
@@ -606,15 +784,28 @@ class EntityExtractor:
             evidence = str(properties.get("evidence") or "").strip()
             source_ref = str(properties.get("source_ref") or "").strip()
             confidence = _confidence(properties.get("confidence"))
-            block, span = self._source_match(document, source_ref, evidence)
+            block, span, evidence_reason = self._source_match_details(
+                document,
+                source_ref,
+                evidence,
+            )
+            rejection_reasons = []
+            if source_key not in nodes:
+                rejection_reasons.append("missing_source_endpoint")
+            if target_key not in nodes:
+                rejection_reasons.append("missing_target_endpoint")
+            if not _relation_type(relationship.type):
+                rejection_reasons.append("invalid_relationship_type")
+            if not evidence:
+                rejection_reasons.append("missing_evidence")
+            elif evidence_reason:
+                rejection_reasons.append(evidence_reason)
+            if confidence < settings.EXTRACTION_MIN_CONFIDENCE:
+                rejection_reasons.append("low_confidence")
             if (
-                source_key not in nodes
-                or target_key not in nodes
-                or not _relation_type(relationship.type)
-                or not evidence
+                rejection_reasons
                 or not block
                 or span is None
-                or confidence < settings.EXTRACTION_MIN_CONFIDENCE
             ):
                 result.diagnostics.append(
                     {
@@ -625,9 +816,11 @@ class EntityExtractor:
                         "evidence": evidence,
                         "source_ref": source_ref,
                         "confidence": confidence,
+                        "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
                     }
                 )
                 continue
+            source_evidence = block.text[span[0]:span[1]]
             source_is_topic = source_key in topic_ids
             target_is_topic = target_key in topic_ids
             provenance = self._source_provenance(document, block, span)
@@ -642,7 +835,7 @@ class EntityExtractor:
                         topic_ids[source_key],
                         source_ref,
                         confidence,
-                        evidence,
+                        source_evidence,
                         provenance,
                     )
                 )
@@ -657,7 +850,7 @@ class EntityExtractor:
                     target_entity_id=entity_ids.get(target_key, ""),
                     relation_type=_relation_type(relationship.type),
                     description=str(properties.get("description") or ""),
-                    evidence=evidence,
+                    evidence=source_evidence,
                     confidence=confidence,
                     source_ref=source_ref,
                     provenance=provenance,

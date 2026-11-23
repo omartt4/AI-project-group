@@ -86,10 +86,14 @@ method, confidence, and language are retained in `document_pages`.
 ## Cache, idempotency, and rebuilds
 
 Extraction cache signatures include document content hash, extraction model,
-prompt version, pipeline version, and normalization version. Renaming unchanged
-content does not trigger duplicate ingestion. New or changed documents are
-processed independently. A per-document cross-process lock prevents concurrent
-duplicate extraction.
+provider, language, embedding model, prompt version, pipeline version,
+normalization/evidence-matching versions, relevant extraction limits, and
+spaCy candidate model names. Each successful extraction caches the complete
+model output, finish reason, token usage, provider/estimated cost, latency, and
+the source regions sent for that request. Renaming unchanged content does not
+trigger duplicate ingestion. New or changed documents are processed
+independently. A per-document cross-process lock prevents concurrent duplicate
+extraction.
 
 ```powershell
 uv run python scripts\ingest.py
@@ -98,8 +102,18 @@ uv run python scripts\ingest.py --file "report.pdf" --rebuild-graph
 
 `--rebuild-graph` requires a complete compatible extraction cache and does not
 call the extraction model. An incomplete or stale cache fails clearly instead
-of falling back to a paid extraction request. Use `--refresh-extraction` only
-when a fresh model extraction is intentionally desired.
+of falling back to a paid extraction request. Legacy caches remain readable
+without making a model request, but are reported as lacking raw-response and
+language/configuration metadata. An incompatible cache requires the explicit
+`--refresh-extraction` option; refreshing logs a warning because it may incur
+model charges. If parsing fails after the provider returns output, the raw
+response and usage are saved in a failed cache; ingestion will not automatically
+repeat that potentially billable request.
+
+Evidence validation normalizes a comparison copy of Arabic text (including
+diacritics, tatweel, common alef forms, and alef maqsura) while retaining the
+original source text and offsets for citations. Ambiguous matches remain
+rejected and diagnostics include the validation reason.
 
 ## Usage and cost accounting
 

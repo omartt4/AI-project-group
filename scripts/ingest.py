@@ -43,7 +43,7 @@ def main() -> None:
     parser.add_argument(
         "--refresh-extraction",
         action="store_true",
-        help="Ignore cache and request a fresh document-level extraction",
+        help="Ignore cache and request a fresh document-level extraction (may incur model charges)",
     )
     args = parser.parse_args()
 

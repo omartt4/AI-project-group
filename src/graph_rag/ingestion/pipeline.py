@@ -67,6 +67,9 @@ from graph_rag.llm.model_client import embedding_model_client, model_request_con
 
 logger = logging.getLogger(__name__)
 
+CACHE_FORMAT_VERSION = "2"
+EVIDENCE_MATCH_VERSION = "arabic-evidence-v1"
+
 
 @dataclass
 class IngestionResult:
@@ -796,13 +799,28 @@ class IngestionPipeline:
         document_name: str = "",
     ) -> GraphExtractionResult:
         """Extract a complete structure-aware document graph with versioned caching."""
+        language = str(getattr(parsed_document, "language", "und") or "und")
+        if refresh_extraction:
+            logger.warning(
+                "Refreshing extraction for document_id=%s bypasses the cache and may incur model charges (model=%s).",
+                document_id,
+                settings.EXTRACTION_MODEL,
+            )
         cached = None if refresh_extraction else self._load_extraction_cache(
             document_id,
             file_hash,
+            language=language,
         )
+        self._raise_for_failed_cache(cached, document_id)
         if cached is not None and cached.cache_stage == "ready":
             logger.info("Using cached graph extraction for document_id=%s", document_id)
             return cached
+        if cached is None and not refresh_extraction:
+            logger.info(
+                "Extraction cache miss for document_id=%s language=%s",
+                document_id,
+                language,
+            )
         if cached is not None:
             if cache_only:
                 raise RuntimeError(
@@ -810,7 +828,12 @@ class IngestionPipeline:
                     "graph rebuild will not call models."
                 )
             with extraction_lock(file_hash or document_id):
-                cached = self._load_extraction_cache(document_id, file_hash)
+                cached = self._load_extraction_cache(
+                    document_id,
+                    file_hash,
+                    language=language,
+                )
+                self._raise_for_failed_cache(cached, document_id)
                 if cached is None:
                     raise RuntimeError(
                         f"Extraction cache disappeared for document {document_id}"
@@ -818,7 +841,12 @@ class IngestionPipeline:
                 if cached.cache_stage == "ready":
                     return cached
                 finalized = self._finalize_document_extraction(cached)
-                self._save_extraction_cache(document_id, file_hash, finalized)
+                self._save_extraction_cache(
+                    document_id,
+                    file_hash,
+                    finalized,
+                    language=language,
+                )
                 return finalized
         if cache_only:
             raise RuntimeError(
@@ -830,7 +858,9 @@ class IngestionPipeline:
             cached = None if refresh_extraction else self._load_extraction_cache(
                 document_id,
                 file_hash,
+                language=language,
             )
+            self._raise_for_failed_cache(cached, document_id)
             if cached is not None and cached.cache_stage == "ready":
                 logger.info(
                     "Using extraction cache populated by another worker: document_id=%s",
@@ -844,7 +874,12 @@ class IngestionPipeline:
                         "graph rebuild will not call models."
                     )
                 finalized = self._finalize_document_extraction(cached)
-                self._save_extraction_cache(document_id, file_hash, finalized)
+                self._save_extraction_cache(
+                    document_id,
+                    file_hash,
+                    finalized,
+                    language=language,
+                )
                 return finalized
             if cache_only:
                 raise RuntimeError(
@@ -911,7 +946,7 @@ class IngestionPipeline:
                     "run_name": "document-graph-extraction",
                 }
             )
-            segment_results = extraction_chain.batch(
+            batch_results = extraction_chain.batch(
                 segments,
                 config={
                     "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
@@ -920,18 +955,88 @@ class IngestionPipeline:
                         "document_name": document_name,
                     },
                 },
+                return_exceptions=True,
             )
+            segment_errors = [
+                result for result in batch_results if isinstance(result, Exception)
+            ]
+            if segment_errors:
+                successful_results = [
+                    result
+                    for result in batch_results
+                    if isinstance(result, GraphExtractionResult)
+                ]
+                failed_extraction = self._merge_document_extractions(
+                    successful_results,
+                    document_id=document_id,
+                )
+                for error in segment_errors:
+                    failed_extraction.model_responses.extend(
+                        getattr(error, "model_responses", [])
+                    )
+                    failed_extraction.diagnostics.append(
+                        {
+                            "diagnostic_type": "graph_extraction_segment_failed",
+                            "error_type": type(error).__name__,
+                            "error": str(error)[:1000],
+                        }
+                    )
+                if failed_extraction.model_responses:
+                    failed_extraction.cache_stage = "failed"
+                    failed_extraction.cache_metadata = {
+                        "cache_format_version": CACHE_FORMAT_VERSION,
+                        "raw_model_responses_available": True,
+                    }
+                    self._save_extraction_cache(
+                        document_id,
+                        file_hash,
+                        failed_extraction,
+                        language=language,
+                    )
+                raise RuntimeError(
+                    f"Graph extraction failed for document {document_id}; "
+                    "any model responses were cached for diagnosis. "
+                    "Use --refresh-extraction to retry, which may incur model charges."
+                ) from segment_errors[0]
+
+            segment_results = batch_results
             extracted = self._merge_document_extractions(
                 segment_results,
                 document_id=document_id,
             )
+            extracted.cache_metadata = {
+                "cache_format_version": CACHE_FORMAT_VERSION,
+                "raw_model_responses_available": bool(extracted.model_responses),
+            }
             if extracted.document_type == "unknown":
                 extracted.document_type = structured_input.document_type
             extracted.cache_stage = "raw"
-            self._save_extraction_cache(document_id, file_hash, extracted)
+            self._save_extraction_cache(
+                document_id,
+                file_hash,
+                extracted,
+                language=language,
+            )
             resolved = self._finalize_document_extraction(extracted, vocabulary)
-            self._save_extraction_cache(document_id, file_hash, resolved)
+            self._save_extraction_cache(
+                document_id,
+                file_hash,
+                resolved,
+                language=language,
+            )
             return resolved
+
+    @staticmethod
+    def _raise_for_failed_cache(
+        cached: Optional[GraphExtractionResult],
+        document_id: str,
+    ) -> None:
+        if cached is not None and cached.cache_stage == "failed":
+            raise RuntimeError(
+                f"Extraction cache for document {document_id} contains a failed "
+                "model response. Inspect its diagnostics, then use "
+                "--refresh-extraction to retry; this may incur model charges."
+            )
 
     def _finalize_document_extraction(
         self,
@@ -1116,6 +1221,11 @@ class IngestionPipeline:
             relations=list(relations.values()),
             topics=accepted_topics,
             diagnostics=diagnostics,
+            model_responses=[
+                response
+                for result in results
+                for response in result.model_responses
+            ],
             document_type=document_type,
         )
 
@@ -1125,7 +1235,44 @@ class IngestionPipeline:
         return settings.EXTRACTION_CACHE_DIR / f"{key}.json"
 
     @staticmethod
-    def _cache_signature() -> Dict[str, str]:
+    def _cache_signature(language: str = "und") -> Dict[str, str]:
+        return {
+            "cache_format_version": CACHE_FORMAT_VERSION,
+            "model": settings.EXTRACTION_MODEL,
+            "provider": settings.MODEL_API_BASE_URL,
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "language": (language or "und").casefold(),
+            "prompt_version": settings.EXTRACTION_PROMPT_VERSION,
+            "pipeline_version": settings.EXTRACTION_VERSION,
+            "normalization_version": settings.NORMALIZATION_VERSION,
+            "evidence_match_version": EVIDENCE_MATCH_VERSION,
+            "context_tokens": str(settings.EXTRACTION_CONTEXT_TOKENS),
+            "output_tokens": str(settings.EXTRACTION_OUTPUT_TOKENS),
+            "minimum_confidence": str(settings.EXTRACTION_MIN_CONFIDENCE),
+            "topic_min_confidence": str(settings.TOPIC_MIN_CONFIDENCE),
+            "spacy_models": "|".join(
+                [
+                    str(getattr(spacy_candidate_extractor, "english_model", "")),
+                    str(
+                        getattr(
+                            spacy_candidate_extractor,
+                            "multilingual_parser_model",
+                            "",
+                        )
+                    ),
+                    str(
+                        getattr(
+                            spacy_candidate_extractor,
+                            "multilingual_ner_model",
+                            "",
+                        )
+                    ),
+                ]
+            ),
+        }
+
+    @staticmethod
+    def _legacy_cache_signature() -> Dict[str, str]:
         return {
             "model": settings.EXTRACTION_MODEL,
             "prompt_version": settings.EXTRACTION_PROMPT_VERSION,
@@ -1134,43 +1281,80 @@ class IngestionPipeline:
         }
 
     def _load_extraction_cache(
-        self, document_id: str, file_hash: str
+        self,
+        document_id: str,
+        file_hash: str,
+        *,
+        language: str = "und",
     ) -> Optional[GraphExtractionResult]:
         path = self._cache_path(document_id)
         if not path.exists():
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("cache_signature") != self._cache_signature():
+            cached_file_hash = payload.get("file_hash")
+            if not cached_file_hash:
+                raise ValueError("Cache record is missing its document content hash")
+            if file_hash and cached_file_hash != file_hash:
                 return None
-            if file_hash and payload.get("file_hash") != file_hash:
-                return None
+            cache_signature = payload.get("cache_signature")
+            is_legacy_cache = cache_signature == self._legacy_cache_signature()
+            if cache_signature != self._cache_signature(language):
+                if is_legacy_cache:
+                    logger.warning(
+                        "Using legacy extraction cache for document_id=%s; it lacks raw model responses and language/configuration metadata. Use --refresh-extraction to regenerate it, which may incur model charges.",
+                        document_id,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Extraction cache for document {document_id} is incompatible "
+                        "with the current language, model, or extraction settings. "
+                        "Use --refresh-extraction to replace it; this may incur model charges."
+                    )
             data = payload["result"]
+            cache_metadata = data.get("cache_metadata")
+            if not isinstance(cache_metadata, dict):
+                cache_metadata = {}
+            if is_legacy_cache:
+                cache_metadata = {
+                    **cache_metadata,
+                    "legacy_cache": True,
+                    "raw_model_responses_available": False,
+                }
             return GraphExtractionResult(
                 entities=[ExtractedEntity(**row) for row in data.get("entities", [])],
                 mentions=[ExtractedMention(**row) for row in data.get("mentions", [])],
                 relations=[ExtractedRelation(**row) for row in data.get("relations", [])],
                 topics=[ExtractedTopic(**row) for row in data.get("topics", [])],
                 diagnostics=data.get("diagnostics", []),
+                model_responses=data.get("model_responses", []),
+                cache_metadata=cache_metadata,
                 document_type=data.get("document_type", "unknown"),
                 cache_stage=data.get("cache_stage", "ready"),
             )
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            logger.warning("Ignoring invalid extraction cache for %s: %s", document_id, exc)
-            return None
+        except RuntimeError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise RuntimeError(
+                f"Extraction cache for document {document_id} is invalid. "
+                "Use --refresh-extraction to replace it; this may incur model charges."
+            ) from exc
 
     def _save_extraction_cache(
         self,
         document_id: str,
         file_hash: str,
         result: GraphExtractionResult,
+        *,
+        language: str = "und",
     ) -> None:
         path = self._cache_path(document_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "cache_format_version": CACHE_FORMAT_VERSION,
             "document_id": document_id,
             "file_hash": file_hash,
-            "cache_signature": self._cache_signature(),
+            "cache_signature": self._cache_signature(language),
             "result": asdict(result),
         }
         temp_path = path.with_suffix(".tmp")

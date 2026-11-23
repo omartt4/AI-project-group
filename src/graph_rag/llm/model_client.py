@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 import uuid
 from contextlib import contextmanager
@@ -17,6 +19,9 @@ from langchain_openrouter import ChatOpenRouter
 
 from graph_rag.config import settings
 from graph_rag.llm.cost_tracker import cost_tracker
+from graph_rag.llm.pricing import PRICING_VERSION, calculate_cost_usd
+
+logger = logging.getLogger(__name__)
 
 
 class ModelConfigurationError(RuntimeError):
@@ -58,6 +63,7 @@ class ModelUsageCallbackHandler(BaseCallbackHandler):
         self.request_id = uuid.uuid4().hex
         self.context = _request_context.get()
         self.started: Dict[str, float] = {}
+        self.response_records: List[Dict[str, Any]] = []
 
     def on_chat_model_start(
         self,
@@ -81,6 +87,108 @@ class ModelUsageCallbackHandler(BaseCallbackHandler):
 
     def on_llm_end(self, response: Any, *, run_id: uuid.UUID, **kwargs: Any) -> None:
         usage = CloudModelClient._usage_from_response(response)
+        generation = None
+        generations = getattr(response, "generations", None)
+        if generations and generations[0]:
+            generation = generations[0][0]
+        message = getattr(generation, "message", response)
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        if not content:
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            tool_calls = getattr(message, "tool_calls", None) or additional_kwargs.get(
+                "tool_calls",
+                [],
+            )
+            if tool_calls:
+                content = json.dumps(tool_calls, ensure_ascii=False, default=str)
+
+        response_metadata = getattr(message, "response_metadata", None) or {}
+        generation_info = getattr(generation, "generation_info", None) or {}
+        finish_reason = (
+            response_metadata.get("finish_reason")
+            or generation_info.get("finish_reason")
+            or response_metadata.get("stop_reason")
+            or generation_info.get("stop_reason")
+        )
+        normalized_finish_reason = str(finish_reason or "").casefold()
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        try:
+            input_tokens = int(input_tokens) if input_tokens is not None else None
+        except (TypeError, ValueError, OverflowError):
+            input_tokens = None
+        try:
+            output_tokens = int(output_tokens) if output_tokens is not None else None
+        except (TypeError, ValueError, OverflowError):
+            output_tokens = None
+        calculation = calculate_cost_usd(
+            self.model,
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+        )
+        latency_ms = int(
+            (time.perf_counter() - self.started.get(str(run_id), time.perf_counter()))
+            * 1000
+        )
+        serializable_usage = json.loads(
+            json.dumps(usage, ensure_ascii=False, default=str)
+        )
+        provider_cost = usage.get("cost")
+        try:
+            provider_cost = float(provider_cost) if provider_cost is not None else None
+        except (TypeError, ValueError, OverflowError):
+            provider_cost = None
+        self.response_records.append(
+            {
+                "request_id": self.request_id,
+                "role": self.role,
+                "operation": "graph_extraction",
+                "provider": settings.MODEL_API_BASE_URL,
+                "endpoint": "/chat/completions",
+                "model": self.model,
+                "status": "success",
+                "retry_count": None,
+                "cache_status": "miss",
+                "raw_model_output": content,
+                "finish_reason": str(finish_reason) if finish_reason is not None else None,
+                "truncated": (
+                    normalized_finish_reason
+                    in {"length", "max_tokens", "max_output_tokens"}
+                    if finish_reason is not None
+                    else None
+                ),
+                "usage": serializable_usage,
+                "provider_cost_usd": provider_cost,
+                "estimated_cost_usd": (
+                    float(calculation.cost_usd)
+                    if calculation.cost_usd is not None
+                    else None
+                ),
+                "pricing_version": PRICING_VERSION,
+                "latency_ms": max(0, latency_ms),
+                "response_id": response_metadata.get("id"),
+                "response_metadata": json.loads(
+                    json.dumps(response_metadata, ensure_ascii=False, default=str)
+                ),
+                "generation_info": json.loads(
+                    json.dumps(generation_info, ensure_ascii=False, default=str)
+                ),
+            }
+        )
+        if normalized_finish_reason in {
+            "length",
+            "max_tokens",
+            "max_output_tokens",
+        }:
+            logger.warning(
+                "Model output may be truncated: role=%s model=%s request_id=%s finish_reason=%s",
+                self.role,
+                self.model,
+                self.request_id,
+                finish_reason,
+            )
         self._record(
             status="success",
             usage=usage,

@@ -338,7 +338,14 @@ def test_document_extraction_cache_reuses_ready_result() -> None:
                         evidence="We propose K-GAN.",
                         confidence=0.98,
                     )
-                ]
+                ],
+                model_responses=[
+                    {
+                        "raw_model_output": '{"nodes":[],"relationships":[]}',
+                        "finish_reason": "stop",
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+                    }
+                ],
             )
 
     class FakeGraph:
@@ -408,12 +415,208 @@ def test_document_extraction_cache_reuses_ready_result() -> None:
             assert fake.calls == 1, "A graph rebuild must reuse the ready extraction cache"
             assert first.cache_stage == second.cache_stage == "ready"
             assert first.entities[0].entity_id == second.entities[0].entity_id
+            assert second.model_responses == first.model_responses
     finally:
         pipeline_module.entity_extractor = original_extractor
         pipeline_module.prepare_document_input = original_prepare
         pipeline_module.spacy_candidate_extractor = original_spacy
         object.__setattr__(settings, "EXTRACTION_CACHE_DIR", original_cache_dir)
         object.__setattr__(settings, "SQLITE_DB_PATH", original_db_path)
+
+
+def test_extraction_cache_signature_tracks_language_and_context_settings() -> None:
+    english_signature = IngestionPipeline._cache_signature("en")
+    arabic_signature = IngestionPipeline._cache_signature("ar")
+    assert english_signature != arabic_signature
+    assert english_signature["cache_format_version"] == "2"
+    assert "evidence_match_version" in english_signature
+    assert "context_tokens" in english_signature
+    assert "spacy_models" in english_signature
+
+
+def test_failed_model_response_is_cached_and_not_retried_implicitly() -> None:
+    from graph_rag.graph.entity_extractor import GraphExtractionError
+
+    class FailingExtractor:
+        calls = 0
+
+        def extract_document(self, document):
+            self.calls += 1
+            raise GraphExtractionError(
+                "mock truncated graph response",
+                model_responses=[
+                    {
+                        "raw_model_output": '{"nodes":',
+                        "finish_reason": "length",
+                        "truncated": True,
+                        "source_refs": ["page:1"],
+                    }
+                ],
+            )
+
+    class FakeGraph:
+        def get_graph_vocabulary(self):
+            return {"entity_types": [], "relationship_types": []}
+
+        def get_known_entity_context(self, candidate_names):
+            return []
+
+    fake = FailingExtractor()
+    original_extractor = pipeline_module.entity_extractor
+    original_cache_dir = settings.EXTRACTION_CACHE_DIR
+    original_db_path = settings.SQLITE_DB_PATH
+    original_prepare = pipeline_module.prepare_document_input
+    original_spacy = pipeline_module.spacy_candidate_extractor
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.graph_db = FakeGraph()
+    pipeline.vector_db = object()
+    structured = StructuredDocumentInput(
+        document_id="failed-doc",
+        title="Failed document",
+        document_type="report",
+        language="en",
+        blocks=[
+            SourceBlock(
+                source_ref="page:1",
+                block_type="paragraph",
+                text="A source sentence.",
+            )
+        ],
+    )
+    fake_spacy = SimpleNamespace(
+        extract=lambda *args: {"entities": [], "noun_phrases": []},
+        token_count=lambda text, *args: len(text.split()),
+    )
+    parsed_document = SimpleNamespace(language="en")
+
+    try:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "data") as tmp:
+            temp_path = Path(tmp)
+            object.__setattr__(settings, "EXTRACTION_CACHE_DIR", temp_path / "cache")
+            object.__setattr__(settings, "SQLITE_DB_PATH", temp_path / "test.sqlite")
+            database.init_db()
+            pipeline_module.entity_extractor = fake
+            pipeline_module.prepare_document_input = lambda _: structured
+            pipeline_module.spacy_candidate_extractor = fake_spacy
+
+            try:
+                pipeline._extract_document_graph(
+                    parsed_document,
+                    "Failed document",
+                    "failed-doc",
+                    file_hash="failed-doc-hash",
+                )
+            except RuntimeError as exc:
+                assert "cached for diagnosis" in str(exc)
+            else:
+                raise AssertionError("A failed segment must fail document extraction")
+
+            cache_path = pipeline._cache_path("failed-doc")
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            assert payload["result"]["cache_stage"] == "failed"
+            assert payload["result"]["model_responses"][0]["truncated"] is True
+
+            try:
+                pipeline._extract_document_graph(
+                    parsed_document,
+                    "Failed document",
+                    "failed-doc",
+                    file_hash="failed-doc-hash",
+                )
+            except RuntimeError as exc:
+                assert "--refresh-extraction" in str(exc)
+            else:
+                raise AssertionError("Failed cached extraction must require explicit refresh")
+            assert fake.calls == 1
+    finally:
+        pipeline_module.entity_extractor = original_extractor
+        pipeline_module.prepare_document_input = original_prepare
+        pipeline_module.spacy_candidate_extractor = original_spacy
+        object.__setattr__(settings, "EXTRACTION_CACHE_DIR", original_cache_dir)
+        object.__setattr__(settings, "SQLITE_DB_PATH", original_db_path)
+
+
+def test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable() -> None:
+    pipeline = object.__new__(IngestionPipeline)
+    original_cache_dir = settings.EXTRACTION_CACHE_DIR
+    try:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "data") as tmp:
+            object.__setattr__(settings, "EXTRACTION_CACHE_DIR", Path(tmp) / "cache")
+            path = pipeline._cache_path("cached-document")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            empty_result = {
+                "entities": [],
+                "mentions": [],
+                "relations": [],
+                "topics": [],
+                "diagnostics": [],
+                "document_type": "report",
+                "cache_stage": "ready",
+            }
+            payload = {
+                "document_id": "cached-document",
+                "file_hash": "same-content",
+                "cache_signature": {
+                    **pipeline._cache_signature("en"),
+                    "language": "ar",
+                },
+                "result": empty_result,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                pipeline._load_extraction_cache(
+                    "cached-document",
+                    "same-content",
+                    language="en",
+                )
+            except RuntimeError as exc:
+                assert "--refresh-extraction" in str(exc)
+                assert "may incur model charges" in str(exc)
+            else:
+                raise AssertionError("Incompatible cache must not trigger implicit extraction")
+
+            payload["cache_signature"] = pipeline._legacy_cache_signature()
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = pipeline._load_extraction_cache(
+                "cached-document",
+                "same-content",
+                language="en",
+            )
+            assert loaded is not None
+            assert loaded.model_responses == []
+            assert loaded.cache_metadata["legacy_cache"] is True
+
+            payload["cache_signature"] = pipeline._cache_signature("en")
+            payload["result"] = {
+                **empty_result,
+                "cache_stage": "failed",
+                "model_responses": [
+                    {
+                        "raw_model_output": '{"nodes":',
+                        "finish_reason": "length",
+                        "truncated": True,
+                    }
+                ],
+                "cache_metadata": {
+                    "raw_model_responses_available": True,
+                },
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            failed = pipeline._load_extraction_cache(
+                "cached-document",
+                "same-content",
+                language="en",
+            )
+            assert failed is not None
+            assert failed.model_responses[0]["truncated"] is True
+            try:
+                pipeline._raise_for_failed_cache(failed, "cached-document")
+            except RuntimeError as exc:
+                assert "--refresh-extraction" in str(exc)
+            else:
+                raise AssertionError("Failed cache must not trigger implicit extraction")
+    finally:
+        object.__setattr__(settings, "EXTRACTION_CACHE_DIR", original_cache_dir)
 
 
 def test_entity_resolver_uses_exact_candidates_and_rejects_ambiguity() -> None:
@@ -1165,6 +1368,9 @@ if __name__ == "__main__":
     test_batch_ingestion_excludes_metadata_catalog()
     test_role_specific_model_routing()
     test_document_extraction_cache_reuses_ready_result()
+    test_extraction_cache_signature_tracks_language_and_context_settings()
+    test_failed_model_response_is_cached_and_not_retried_implicitly()
+    test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable()
     test_entity_resolver_uses_exact_candidates_and_rejects_ambiguity()
     test_type_normalization_keeps_unseen_types_open()
     test_entity_vector_upsert_avoids_reembedding_unchanged_entities()

@@ -878,7 +878,10 @@ class StructuredFileParserTests(unittest.TestCase):
 
         run_id = uuid.uuid4()
         with model_request_context(run_id="query-42", user_id=9):
-            callback = ModelUsageCallbackHandler("extraction", "mock-model")
+            callback = ModelUsageCallbackHandler(
+                "extraction",
+                "qwen/qwen3.7-flash",
+            )
             callback.on_chat_model_start({}, [[]], run_id=run_id)
             response = LLMResult(
                 generations=[[
@@ -889,6 +892,11 @@ class StructuredFileParserTests(unittest.TestCase):
                                 "input_tokens": 12,
                                 "output_tokens": 4,
                                 "total_tokens": 16,
+                            },
+                            response_metadata={
+                                "finish_reason": "length",
+                                "id": "mock-response-1",
+                                "cost": 0.25,
                             },
                         )
                     )
@@ -903,6 +911,23 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertEqual(call["usage"]["completion_tokens"], 4)
         self.assertEqual(call["run_id"], "query-42")
         self.assertEqual(call["user_id"], 9)
+        self.assertEqual(len(callback.response_records), 1)
+        self.assertEqual(callback.response_records[0]["raw_model_output"], "{}")
+        self.assertEqual(callback.response_records[0]["finish_reason"], "length")
+        self.assertTrue(callback.response_records[0]["truncated"])
+        self.assertEqual(callback.response_records[0]["provider_cost_usd"], 0.25)
+        self.assertAlmostEqual(
+            callback.response_records[0]["estimated_cost_usd"],
+            0.00000088,
+        )
+        self.assertEqual(
+            callback.response_records[0]["pricing_version"],
+            "2026-11-23",
+        )
+        self.assertEqual(
+            callback.response_records[0]["response_id"],
+            "mock-response-1",
+        )
 
         failed_run_id = uuid.uuid4()
         with model_request_context(run_id="query-43", user_id=10):
@@ -1230,6 +1255,144 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertEqual(len(result.relations), 1)
         self.assertEqual(result.relations[0].relation_type, "INFLUENCES")
 
+    def test_arabic_evidence_matching_preserves_original_source_offsets(self) -> None:
+        from graph_rag.graph.entity_extractor import EntityExtractor
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+        )
+
+        source_text = "إِبْراهيم زار الـقاهرة."
+        block = SourceBlock(
+            source_ref="page:1",
+            block_type="paragraph",
+            text=source_text,
+            page_number=1,
+            start_offset=100,
+            character_offsets=list(range(100, 100 + len(source_text))),
+        )
+        document = StructuredDocumentInput(
+            document_id="arabic-report",
+            title="Arabic report",
+            document_type="report",
+            language="ar",
+            blocks=[block],
+        )
+
+        matched_block, span, reason = EntityExtractor._source_match_details(
+            document,
+            "page:1",
+            "ابراهيم زار القاهرة",
+        )
+
+        self.assertIs(matched_block, block)
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(span)
+        start, end = span
+        self.assertEqual(source_text[start:end], "إِبْراهيم زار الـقاهرة")
+        provenance = EntityExtractor._source_provenance(document, block, span)
+        self.assertEqual(
+            provenance["source_offsets"],
+            [{"start": 100 + start, "end": 100 + end}],
+        )
+
+    def test_arabic_evidence_matching_rejects_repeated_matches_as_ambiguous(self) -> None:
+        from graph_rag.graph.entity_extractor import EntityExtractor
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+        )
+
+        document = StructuredDocumentInput(
+            document_id="arabic-report",
+            title="Arabic report",
+            document_type="report",
+            language="ar",
+            blocks=[
+                SourceBlock(
+                    source_ref="page:1",
+                    block_type="paragraph",
+                    text="زار إبراهيم القاهرة. زار ابراهيم القاهرة.",
+                )
+            ],
+        )
+
+        block, span, reason = EntityExtractor._source_match_details(
+            document,
+            "",
+            "زار إبراهيم القاهرة",
+        )
+
+        self.assertIsNone(block)
+        self.assertIsNone(span)
+        self.assertEqual(reason, "ambiguous_evidence")
+
+    def test_graph_extraction_stores_the_original_arabic_evidence_quote(self) -> None:
+        from types import SimpleNamespace
+        from graph_rag.graph.entity_extractor import EntityExtractor
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+        )
+
+        source_text = "إِبْراهيم زار الـقاهرة."
+        entity = SimpleNamespace(
+            id="إبراهيم",
+            type="Person",
+            properties={
+                "evidence": "ابراهيم زار القاهرة",
+                "source_ref": "page:1",
+                "confidence": 0.96,
+            },
+        )
+        graph_document = SimpleNamespace(nodes=[entity], relationships=[])
+        document = StructuredDocumentInput(
+            document_id="arabic-report",
+            title="Arabic report",
+            document_type="report",
+            language="ar",
+            blocks=[
+                SourceBlock(
+                    source_ref="page:1",
+                    block_type="paragraph",
+                    text=source_text,
+                    page_number=1,
+                    character_offsets=list(range(len(source_text))),
+                )
+            ],
+        )
+
+        class FakeTransformer:
+            def __init__(self, **kwargs):
+                pass
+
+            def process_response(self, source, config):
+                return graph_document
+
+        with (
+            patch(
+                "graph_rag.graph.entity_extractor.LLMGraphTransformer",
+                FakeTransformer,
+            ),
+            patch(
+                "graph_rag.graph.entity_extractor.JsonModeChatModel",
+                side_effect=lambda model: model,
+            ),
+            patch(
+                "graph_rag.graph.entity_extractor.ModelUsageCallbackHandler",
+                return_value=SimpleNamespace(response_records=[]),
+            ),
+        ):
+            result = EntityExtractor(
+                client=SimpleNamespace(as_chat_model=lambda: object())
+            ).extract_document(document)
+
+        self.assertEqual(result.entities[0].evidence, source_text[:-1])
+        self.assertEqual(
+            result.entities[0].provenance["source_offsets"],
+            [{"start": 0, "end": len(source_text) - 1}],
+        )
+
     def test_graph_transformer_prompt_escapes_literal_json_braces(self) -> None:
         from graph_rag.graph.entity_extractor import GRAPH_TRANSFORMER_PROMPT
 
@@ -1339,7 +1502,7 @@ class StructuredFileParserTests(unittest.TestCase):
             ),
             patch(
                 "graph_rag.graph.entity_extractor.ModelUsageCallbackHandler",
-                return_value=object(),
+                return_value=SimpleNamespace(response_records=[]),
             ),
         ):
             result = EntityExtractor(
@@ -1355,11 +1518,79 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertEqual(len(result.relations), 1)
         self.assertEqual(result.relations[0].relation_type, "INFLUENCES")
         self.assertTrue(all(entity.provenance["page_number"] == 1 for entity in result.entities))
-        self.assertTrue(
-            any(
-                diagnostic["diagnostic_type"] == "rejected_node"
-                for diagnostic in result.diagnostics
-            )
+        rejected_node = next(
+            diagnostic
+            for diagnostic in result.diagnostics
+            if diagnostic["diagnostic_type"] == "rejected_node"
+        )
+        self.assertIn("invalid_entity_name", rejected_node["rejection_reasons"])
+
+    def test_document_extraction_error_retains_raw_model_response(self) -> None:
+        from types import SimpleNamespace
+        from graph_rag.graph.entity_extractor import (
+            EntityExtractor,
+            GraphExtractionError,
+        )
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+        )
+
+        source = StructuredDocumentInput(
+            document_id="report",
+            title="Report",
+            document_type="report",
+            language="ar",
+            blocks=[
+                SourceBlock(
+                    source_ref="page:1",
+                    block_type="paragraph",
+                    text="النص العربي.",
+                    page_number=1,
+                )
+            ],
+        )
+        response_record = {
+            "raw_model_output": '{"nodes":',
+            "finish_reason": "length",
+            "truncated": True,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+
+        class FakeTransformer:
+            def __init__(self, **kwargs):
+                pass
+
+            def process_response(self, document, config):
+                raise ValueError("mock truncated JSON")
+
+        with (
+            patch(
+                "graph_rag.graph.entity_extractor.LLMGraphTransformer",
+                FakeTransformer,
+            ),
+            patch(
+                "graph_rag.graph.entity_extractor.JsonModeChatModel",
+                side_effect=lambda model: model,
+            ),
+            patch(
+                "graph_rag.graph.entity_extractor.ModelUsageCallbackHandler",
+                return_value=SimpleNamespace(response_records=[response_record]),
+            ),
+        ):
+            with self.assertRaises(GraphExtractionError) as error:
+                EntityExtractor(
+                    client=SimpleNamespace(as_chat_model=lambda: object())
+                ).extract_document(source)
+
+        self.assertEqual(
+            error.exception.model_responses[0]["raw_model_output"],
+            '{"nodes":',
+        )
+        self.assertEqual(error.exception.model_responses[0]["language"], "ar")
+        self.assertEqual(
+            error.exception.model_responses[0]["source_refs"],
+            ["page:1"],
         )
 
     def test_graph_extraction_uses_json_mode_and_parses_ai_message(self) -> None:
