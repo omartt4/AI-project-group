@@ -1,0 +1,66 @@
+{
+  "config_name": "arabic_e5small_384_256_vector",
+  "model": "intfloat/multilingual-e5-small",
+  "dimension": 384,
+  "chunk_size_tokens": 256,
+  "query_prefix": "query: ",
+  "strict_hit_rule": "retrieved chunk has same book_id and contains the gold span center",
+  "n_questions": 22,
+  "small_sample_warning": "With this sample size, differences of 1-2 questions are not meaningful.",
+  "ambiguous_question_heuristic": "The exact gold answer_quote also appears in the other book's cleaned text.",
+  "retrievers": {
+    "vector_e5": {
+      "config_name": "arabic_e5small_384_256_vector",
+      "retriever": "vector_e5",
+      "n": 22,
+      "hit@1": 0.5454545454545454,
+      "hit@1_count": 12,
+      "hit@1_ci95": [
+        0.34659473289041554,
+        0.7307998556799515
+      ],
+      "hit@5": 0.9090909090909091,
+      "hit@5_count": 20,
+      "hit@10": 1.0,
+      "hit@10_count": 22,
+      "hit@10_ci95": [
+        0.8513404742740388,
+        1.0
+      ],
+      "mrr": 0.7045454545454546,
+      "failure_counts_at_1": {
+        "hit": 12,
+        "ambiguous_question": 0,
+        "right_book_wrong_chunk": 10,
+        "wrong_book": 0
+      }
+    },
+    "bm25": {
+      "config_name": "arabic_e5small_384_256_vector",
+      "retriever": "bm25",
+      "n": 22,
+      "hit@1": 0.45454545454545453,
+      "hit@1_count": 10,
+      "hit@1_ci95": [
+        0.26920014432004846,
+        0.6534052671095845
+      ],
+      "hit@5": 0.8636363636363636,
+      "hit@5_count": 19,
+      "hit@10": 0.9090909090909091,
+      "hit@10_count": 20,
+      "hit@10_ci95": [
+        0.7218461934161421,
+        0.9747051037171622
+      ],
+      "mrr": 0.6353535353535353,
+      "failure_counts_at_1": {
+        "hit": 10,
+        "ambiguous_question": 0,
+        "right_book_wrong_chunk": 12,
+        "wrong_book": 0
+      }
+    }
+  },
+  "local_embedding_cost_usd": 0
+}

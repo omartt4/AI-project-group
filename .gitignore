@@ -19,3 +19,12 @@ data/
 # Local PDF corpus
 pdfs/
 
+# Arabic mini-lab source books and generated local data
+model_arabic/raw/
+model_arabic/cleaned/
+model_arabic/chunks/
+model_arabic/chroma/
+model_arabic/eval/inspect_report*.txt
+model_arabic/eval/cleaned_snippets*
+model_arabic/eval/*.old
+
