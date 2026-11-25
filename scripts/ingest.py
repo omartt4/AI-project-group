@@ -45,6 +45,11 @@ def main() -> None:
         action="store_true",
         help="Ignore cache and request a fresh document-level extraction (may incur model charges)",
     )
+    parser.add_argument(
+        "--refresh-vectors",
+        action="store_true",
+        help="Reparse, OCR, and replace document chunks/embeddings while reusing extraction cache",
+    )
     args = parser.parse_args()
 
     print("=" * 65)
@@ -79,6 +84,7 @@ def main() -> None:
         only_filename=args.only_filename,
         rebuild_graph=args.rebuild_graph,
         refresh_extraction=args.refresh_extraction,
+        refresh_vectors=args.refresh_vectors,
     )
 
     completed = [r for r in results if r.status == "completed"]

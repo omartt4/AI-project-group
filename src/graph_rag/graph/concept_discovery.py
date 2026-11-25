@@ -149,15 +149,23 @@ class ConceptDiscoveryEngine:
         query = """
         MATCH (e:Entity)
         WHERE e.dataset_id = $dataset_id
-          AND toLower(e.name) CONTAINS toLower($kw)
+          AND (
+              toLower(e.name) CONTAINS toLower($kw)
+              OR any(alias IN coalesce(e.aliases, [])
+                     WHERE toLower(alias) CONTAINS toLower($kw))
+          )
         OPTIONAL MATCH (e)-[r]-(neighbor)
         WHERE neighbor IS NULL OR (
-            neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
+            neighbor.dataset_id = $dataset_id
+            AND (neighbor:Entity OR neighbor:Document OR neighbor:Paper)
         )
         RETURN e.name AS e_name, e.category AS e_cat, e.description AS e_desc,
                coalesce(r.relation_type, type(r)) AS rel,
                coalesce(neighbor.name, neighbor.title) AS n_name,
-               CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS n_cat,
+               CASE
+                   WHEN neighbor:Document OR neighbor:Paper THEN 'Document'
+                   ELSE neighbor.category
+               END AS n_cat,
                neighbor.description AS n_desc
         LIMIT $limit
         """
@@ -214,10 +222,18 @@ class ConceptDiscoveryEngine:
         query = """
         MATCH (a:Entity)
         WHERE a.dataset_id = $dataset_id
-          AND toLower(a.name) CONTAINS toLower($target_a)
+          AND (
+              toLower(a.name) CONTAINS toLower($target_a)
+              OR any(alias IN coalesce(a.aliases, [])
+                     WHERE toLower(alias) CONTAINS toLower($target_a))
+          )
         MATCH (b:Entity)
         WHERE b.dataset_id = $dataset_id
-          AND toLower(b.name) CONTAINS toLower($target_b)
+          AND (
+              toLower(b.name) CONTAINS toLower($target_b)
+              OR any(alias IN coalesce(b.aliases, [])
+                     WHERE toLower(alias) CONTAINS toLower($target_b))
+          )
         MATCH (a)-[r1]-(bridge:Entity)-[r2]-(b)
         WHERE bridge.dataset_id = $dataset_id
         RETURN DISTINCT bridge.name AS bridge_name, bridge.category AS bridge_cat,
@@ -268,7 +284,11 @@ class ConceptDiscoveryEngine:
         query = """
         MATCH (e:Entity)
         WHERE e.dataset_id = $dataset_id
-          AND any(kw in $keywords WHERE toLower(e.name) CONTAINS toLower(kw))
+          AND any(kw in $keywords WHERE
+              toLower(e.name) CONTAINS toLower(kw)
+              OR any(alias IN coalesce(e.aliases, [])
+                     WHERE toLower(alias) CONTAINS toLower(kw))
+          )
         OPTIONAL MATCH (e)-[r]-()
         WITH e, count(r) AS degree
         ORDER BY degree DESC

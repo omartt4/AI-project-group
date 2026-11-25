@@ -6,6 +6,7 @@ Extracts text, page boundaries, and document metadata from PDF files using PyMuP
 
 from dataclasses import dataclass, field
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Union
@@ -14,6 +15,9 @@ import pymupdf as fitz  # PyMuPDF
 from graph_rag.config import settings
 from graph_rag.ingestion.language import detect_language
 from graph_rag.ingestion.ocr import OCRProvider, TesseractOCRProvider
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,6 +70,68 @@ class PDFParser:
         self.ocr_dpi = ocr_dpi
         self.ocr_languages = ocr_languages or settings.OCR_LANGUAGES
 
+    @staticmethod
+    def _word_character_count(text: str) -> int:
+        return len(re.findall(r"\w", text, flags=re.UNICODE))
+
+    @staticmethod
+    def _repeated_letter_ratio(text: str) -> float:
+        letters = sum(character.isalpha() for character in text)
+        if not letters:
+            return 0.0
+        repeated = sum(
+            len(match.group(0))
+            for match in re.finditer(r"([^\W\d_])\1{3,}", text, flags=re.UNICODE)
+        )
+        return repeated / letters
+
+    @classmethod
+    def _needs_full_page_ocr(cls, text: str) -> bool:
+        """OCR empty, visibly corrupted, and Arabic/mixed embedded-text pages.
+
+        Arabic PDFs commonly expose a non-empty but incorrectly mapped font layer.
+        Character count alone therefore cannot establish that the text is usable.
+        Arabic and mixed pages are OCR-verified, while obvious repeated-letter
+        corruption forces OCR for every language.
+        """
+        if cls._word_character_count(text) < 30:
+            return True
+        if cls._repeated_letter_ratio(text) >= 0.03:
+            return True
+        return detect_language(text) in {"ar", "mixed"}
+
+    @classmethod
+    def _prefer_ocr_text(
+        cls,
+        embedded_text: str,
+        ocr_text: str,
+        confidence: Optional[float],
+    ) -> bool:
+        """Choose OCR only when it contains a credible amount of readable text."""
+        ocr_characters = cls._word_character_count(ocr_text)
+        if confidence is not None and confidence < 0.45:
+            return False
+        embedded_characters = cls._word_character_count(embedded_text)
+        if embedded_characters < 30:
+            return ocr_characters >= 2
+        if ocr_characters < 30:
+            return False
+        minimum_relative_size = max(30, int(embedded_characters * 0.25))
+        return ocr_characters >= minimum_relative_size
+
+    @staticmethod
+    def _is_generic_title(title: str) -> bool:
+        normalized = " ".join(str(title or "").casefold().split())
+        return normalized in {
+            "document",
+            "microsoft powerpoint",
+            "powerpoint presentation",
+            "presentation",
+            "scan",
+            "scanned document",
+            "untitled",
+        } or normalized.endswith(".pdf")
+
     def parse(self, source: Union[str, Path, bytes], filename: str = "document.pdf") -> ParsedDocument:
         """Parse a PDF from a file path or in-memory bytes."""
         if isinstance(source, bytes):
@@ -106,27 +172,43 @@ class PDFParser:
                 if page_text:
                     extraction_methods.append("embedded_text")
 
-                has_usable_text = len(re.findall(r"\w", page_text, flags=re.UNICODE)) >= 30
+                has_usable_text = self._word_character_count(page_text) >= 30
                 page_images = page.get_images(full=True)
-                if not has_usable_text and page_images:
-                    pixmap = page.get_pixmap(dpi=self.ocr_dpi, alpha=False)
-                    result = self.ocr_provider.extract(
-                        pixmap.tobytes("png"),
-                        language=self.ocr_languages,
-                    )
-                    ocr_text = result.text.strip()
-                    if ocr_text:
-                        ocr_text_parts.append(ocr_text)
-                        extraction_methods.append("tesseract_ocr")
-                        page_text = "\n\n".join(
-                            part for part in (page_text, ocr_text) if part
+                attempted_full_page_ocr = self._needs_full_page_ocr(page_text)
+                if attempted_full_page_ocr:
+                    try:
+                        pixmap = page.get_pixmap(dpi=self.ocr_dpi, alpha=False)
+                        result = self.ocr_provider.extract(
+                            pixmap.tobytes("png"),
+                            language=self.ocr_languages,
                         )
-                    if result.confidence is not None:
-                        confidences.append(result.confidence)
-                    scale = 72 / self.ocr_dpi
-                    bounding_boxes.extend(
-                        self._scale_boxes(result.bounding_boxes, scale, scale)
-                    )
+                    except RuntimeError as exc:
+                        logger.warning(
+                            "Full-page OCR unavailable for %s page %d; retaining embedded text: %s",
+                            filename,
+                            page_idx + 1,
+                            exc,
+                        )
+                    else:
+                        ocr_text = result.text.strip()
+                        if ocr_text:
+                            ocr_text_parts.append(ocr_text)
+                        if self._prefer_ocr_text(
+                            page_text,
+                            ocr_text,
+                            result.confidence,
+                        ):
+                            page_text = ocr_text
+                            extraction_methods = ["tesseract_ocr"]
+                            has_usable_text = True
+                            scale = 72 / self.ocr_dpi
+                            bounding_boxes = self._scale_boxes(
+                                result.bounding_boxes,
+                                scale,
+                                scale,
+                            )
+                        if result.confidence is not None:
+                            confidences.append(result.confidence)
                 elif has_usable_text and page_images:
                     for xref in dict.fromkeys(image[0] for image in page_images):
                         image = doc.extract_image(xref)
@@ -186,17 +268,18 @@ class PDFParser:
             extracted_title = meta.get("title", "").strip()
 
             # If embedded title is absent or generic, attempt to extract from top lines of page 1
-            if not extracted_title or extracted_title.lower().endswith(".pdf"):
+            if not extracted_title or self._is_generic_title(extracted_title):
                 if pages:
                     first_lines = [
                         line.strip()
                         for line in pages[0].text.split("\n")
                         if len(line.strip()) > 5
+                        and self._repeated_letter_ratio(line.strip()) < 0.03
                     ]
                     if first_lines:
                         extracted_title = first_lines[0]
 
-            if not extracted_title:
+            if not extracted_title or self._is_generic_title(extracted_title):
                 extracted_title = Path(filename).stem.replace("_", " ")
 
             return ParsedDocument(

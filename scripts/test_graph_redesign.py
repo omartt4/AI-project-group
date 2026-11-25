@@ -536,6 +536,81 @@ def test_failed_model_response_is_cached_and_not_retried_implicitly() -> None:
         object.__setattr__(settings, "SQLITE_DB_PATH", original_db_path)
 
 
+def test_failed_segment_is_split_without_repeating_successful_segments() -> None:
+    from graph_rag.graph.entity_extractor import GraphExtractionError
+
+    class FakeExtractionChain:
+        def __init__(self):
+            self.source_ref_calls = []
+
+        def batch(self, segments, config, return_exceptions):
+            assert return_exceptions is True
+            results = []
+            for segment in segments:
+                source_refs = tuple(block.source_ref for block in segment.blocks)
+                self.source_ref_calls.append(source_refs)
+                if source_refs == ("bad",):
+                    results.append(
+                        GraphExtractionError(
+                            "mock malformed JSON",
+                            model_responses=[{"raw_model_output": '{"nodes":'}],
+                        )
+                    )
+                    continue
+                results.append(
+                    GraphExtractionResult(
+                        entities=[
+                            ExtractedEntity(
+                                name=source_refs[0],
+                                category="Test Entity",
+                            )
+                        ]
+                    )
+                )
+            return results
+
+    good = StructuredDocumentInput(
+        document_id="retry-doc",
+        title="Retry document",
+        document_type="report",
+        language="en",
+        blocks=[SourceBlock("good", "paragraph", "A successful source region.")],
+    )
+    bad_text = " ".join(
+        f"Sentence {index} contains grounded extraction evidence."
+        for index in range(500)
+    )
+    bad = StructuredDocumentInput(
+        document_id="retry-doc",
+        title="Retry document",
+        document_type="report",
+        language="en",
+        blocks=[SourceBlock("bad", "paragraph", bad_text)],
+    )
+    chain = FakeExtractionChain()
+    pipeline = object.__new__(IngestionPipeline)
+
+    successes, terminal_errors, attempted_errors = (
+        pipeline._extract_segments_with_retry(
+            chain,
+            [good, bad],
+            document_id="retry-doc",
+            document_name="retry.pdf",
+        )
+    )
+
+    assert not terminal_errors
+    assert len(attempted_errors) == 1
+    assert chain.source_ref_calls.count(("good",)) == 1
+    assert chain.source_ref_calls.count(("bad",)) == 1
+    assert len(successes) > 2
+    assert any(
+        source_refs[0].startswith("bad:")
+        for source_refs in chain.source_ref_calls
+        if source_refs
+    )
+
+
 def test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable() -> None:
     pipeline = object.__new__(IngestionPipeline)
     original_cache_dir = settings.EXTRACTION_CACHE_DIR
@@ -1104,6 +1179,10 @@ def test_graph_rebuild_repairs_missing_vectors() -> None:
     assert IngestionPipeline._needs_vector_write(False, 5)
     assert IngestionPipeline._needs_vector_write(True, 0)
     assert not IngestionPipeline._needs_vector_write(True, 5)
+    assert IngestionPipeline._needs_vector_replace(True, False, 5)
+    assert IngestionPipeline._needs_vector_replace(False, True, 5)
+    assert not IngestionPipeline._needs_vector_replace(False, False, 5)
+    assert not IngestionPipeline._needs_vector_replace(True, False, 0)
 
 
 def test_dynamic_entity_cypher_is_renderable() -> None:
@@ -1370,6 +1449,7 @@ if __name__ == "__main__":
     test_document_extraction_cache_reuses_ready_result()
     test_extraction_cache_signature_tracks_language_and_context_settings()
     test_failed_model_response_is_cached_and_not_retried_implicitly()
+    test_failed_segment_is_split_without_repeating_successful_segments()
     test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable()
     test_entity_resolver_uses_exact_candidates_and_rejects_ambiguity()
     test_type_normalization_keeps_unseen_types_open()

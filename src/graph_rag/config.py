@@ -82,6 +82,12 @@ class Settings:
     EXTRACTION_OUTPUT_TOKENS: int = int(
         os.getenv("EXTRACTION_OUTPUT_TOKENS", "8192")
     )
+    EXTRACTION_SEGMENT_MAX_CHARS: int = int(
+        os.getenv("EXTRACTION_SEGMENT_MAX_CHARS", "40000")
+    )
+    EXTRACTION_SEGMENT_RETRY_DEPTH: int = int(
+        os.getenv("EXTRACTION_SEGMENT_RETRY_DEPTH", "2")
+    )
     EXTRACTION_MIN_CONFIDENCE: float = float(
         os.getenv("EXTRACTION_MIN_CONFIDENCE", "0.65")
     )

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import os
+from pathlib import Path
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -22,6 +25,28 @@ class OCRProvider(Protocol):
 class TesseractOCRProvider:
     """Run local Tesseract OCR and retain word-level confidence and boxes."""
 
+    @staticmethod
+    def _configure_windows_executable(pytesseract_module: Any) -> None:
+        """Find a standard Windows install even when it is absent from PATH."""
+        configured = str(pytesseract_module.pytesseract.tesseract_cmd or "tesseract")
+        if shutil.which(configured) or Path(configured).is_file():
+            return
+        candidates = [
+            os.getenv("TESSERACT_CMD", ""),
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            str(
+                Path(os.getenv("LOCALAPPDATA", ""))
+                / "Programs"
+                / "Tesseract-OCR"
+                / "tesseract.exe"
+            ),
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                pytesseract_module.pytesseract.tesseract_cmd = candidate
+                return
+
     def extract(self, image_bytes: bytes, language: str) -> OCRResult:
         try:
             from PIL import Image
@@ -36,6 +61,7 @@ class TesseractOCRProvider:
                 "Install the optional Pillow and pytesseract packages to use OCR."
             ) from exc
 
+        self._configure_windows_executable(pytesseract)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         try:
             data = pytesseract.image_to_data(

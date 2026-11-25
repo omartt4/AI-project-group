@@ -46,6 +46,7 @@ from graph_rag.graph.entity_extractor import (
     ExtractedMention,
     ExtractedRelation,
     ExtractedTopic,
+    GraphExtractionError,
     GraphExtractionResult,
     entity_extractor,
 )
@@ -62,13 +63,23 @@ from graph_rag.ingestion.document_structure import (
     split_document_input,
 )
 from graph_rag.ingestion.metadata_manager import metadata_manager
+from graph_rag.ingestion.pdf_parser import PDFParser
 from graph_rag.ingestion.spacy_candidates import spacy_candidate_extractor
 from graph_rag.llm.model_client import embedding_model_client, model_request_context
 
 logger = logging.getLogger(__name__)
 
 CACHE_FORMAT_VERSION = "2"
-EVIDENCE_MATCH_VERSION = "arabic-evidence-v1"
+EVIDENCE_MATCH_VERSION = "arabic-evidence-v2"
+
+
+def _usable_document_title(*titles: str, filename: str) -> str:
+    """Prefer a parsed/source title over generic office-export metadata."""
+    for title in titles:
+        value = " ".join(str(title or "").split())
+        if value and not PDFParser._is_generic_title(value):
+            return value
+    return Path(filename).stem.replace("_", " ")
 
 
 @dataclass
@@ -117,6 +128,7 @@ class IngestionPipeline:
         only_filename: Optional[str] = None,
         rebuild_graph: bool = False,
         refresh_extraction: bool = False,
+        refresh_vectors: bool = False,
     ) -> List[IngestionResult]:
         """
         Run initial batch ingestion over pdfs/ folder.
@@ -195,6 +207,7 @@ class IngestionPipeline:
                 and not has_pending_run
                 and not rebuild_graph
                 and not refresh_extraction
+                and not refresh_vectors
             ):
                 results.append(
                     IngestionResult(
@@ -223,7 +236,11 @@ class IngestionPipeline:
                     content_hash=file_hash,
                 )
                 extracted_metadata = parsed_doc.metadata
-                doc_title = rec.get("title") or parsed_doc.title or filename
+                doc_title = _usable_document_title(
+                    parsed_doc.title,
+                    rec.get("title", ""),
+                    filename=filename,
+                )
                 topic = rec.get("topic") or ""
                 update_ingestion_run(run_id, "parsed")
                 if progress_callback:
@@ -262,7 +279,11 @@ class IngestionPipeline:
                 content_changed = existing_vector_chunks > 0 and (
                     not rec.get("ingested_at") or old_hash != file_hash
                 )
-                if content_changed:
+                if self._needs_vector_replace(
+                    refresh_extraction or refresh_vectors,
+                    content_changed,
+                    existing_vector_chunks,
+                ):
                     self._run_model_stage(
                         run_id,
                         None,
@@ -272,7 +293,7 @@ class IngestionPipeline:
                     )
                     if progress_callback:
                         progress_callback(
-                            idx, total_files, f"Replaced stale vector chunks: {filename}"
+                            idx, total_files, f"Replaced refreshed vector chunks: {filename}"
                         )
                 elif self._needs_vector_write(rebuild_graph, existing_vector_chunks):
                     self._run_model_stage(
@@ -429,6 +450,17 @@ class IngestionPipeline:
         return not rebuild_graph or existing_chunk_count == 0
 
     @staticmethod
+    def _needs_vector_replace(
+        refresh_extraction: bool,
+        content_changed: bool,
+        existing_chunk_count: int,
+    ) -> bool:
+        """Replace stale vectors when parsing/extraction was explicitly refreshed."""
+        return existing_chunk_count > 0 and (
+            refresh_extraction or content_changed
+        )
+
+    @staticmethod
     def _run_model_stage(
         run_id: int,
         user_id: Optional[int],
@@ -542,7 +574,10 @@ class IngestionPipeline:
                 content_hash=file_hash,
             )
             update_ingestion_run(run_id, "parsed")
-            doc_title = parsed_doc.title
+            doc_title = _usable_document_title(
+                parsed_doc.title,
+                filename=filename,
+            )
 
             # Step 4: Chunk Text
             chunks = chunker.chunk_document(parsed_doc)
@@ -552,7 +587,10 @@ class IngestionPipeline:
 
             # Step 5: Extract the compact document graph once and cache it.
             extracted_metadata = parsed_doc.metadata
-            doc_title = parsed_doc.title or filename
+            doc_title = _usable_document_title(
+                parsed_doc.title,
+                filename=filename,
+            )
             topic = ""
             graph_result = self._run_model_stage(
                 run_id,
@@ -788,6 +826,100 @@ class IngestionPipeline:
                 file_hash=file_hash,
             )
 
+    @staticmethod
+    def _split_failed_extraction_segment(
+        segment: Any,
+    ) -> List[Any]:
+        """Split one failed segment without changing successful segments."""
+        rendered_length = len(segment.render())
+        retry_max_characters = max(4000, rendered_length // 2)
+        if retry_max_characters >= rendered_length:
+            return [segment]
+        try:
+            return split_document_input(
+                segment,
+                retry_max_characters,
+                len,
+            )
+        except ValueError:
+            return [segment]
+
+    def _extract_segments_with_retry(
+        self,
+        extraction_chain: Any,
+        segments: List[Any],
+        *,
+        document_id: str,
+        document_name: str,
+        retry_depth: int = 0,
+    ) -> tuple[List[GraphExtractionResult], List[Exception], List[Exception]]:
+        """Retry only malformed/truncated segments after splitting them in half."""
+        batch_results = extraction_chain.batch(
+            segments,
+            config={
+                "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
+                "metadata": {
+                    "document_id": document_id,
+                    "document_name": document_name,
+                    "extraction_retry_depth": retry_depth,
+                },
+            },
+            return_exceptions=True,
+        )
+        successful_results: List[GraphExtractionResult] = []
+        terminal_errors: List[Exception] = []
+        attempted_errors: List[Exception] = []
+
+        for segment, result in zip(segments, batch_results):
+            if isinstance(result, GraphExtractionResult):
+                truncated = any(
+                    diagnostic.get("diagnostic_type")
+                    == "truncated_model_output"
+                    for diagnostic in result.diagnostics
+                )
+                if not truncated:
+                    successful_results.append(result)
+                    continue
+                result = GraphExtractionError(
+                    "Extraction output reached its token limit",
+                    model_responses=result.model_responses,
+                )
+            if not isinstance(result, Exception):
+                result = RuntimeError(
+                    "Extraction returned an unexpected segment result"
+                )
+            attempted_errors.append(result)
+
+            retry_segments = [segment]
+            if retry_depth < settings.EXTRACTION_SEGMENT_RETRY_DEPTH:
+                retry_segments = self._split_failed_extraction_segment(segment)
+            if len(retry_segments) <= 1:
+                terminal_errors.append(result)
+                continue
+
+            logger.warning(
+                "Retrying failed graph extraction segment: document_id=%s "
+                "retry_depth=%d child_segments=%d error=%s",
+                document_id,
+                retry_depth + 1,
+                len(retry_segments),
+                str(result)[:500],
+            )
+            child_successes, child_terminal, child_attempts = (
+                self._extract_segments_with_retry(
+                    extraction_chain,
+                    retry_segments,
+                    document_id=document_id,
+                    document_name=document_name,
+                    retry_depth=retry_depth + 1,
+                )
+            )
+            successful_results.extend(child_successes)
+            terminal_errors.extend(child_terminal)
+            attempted_errors.extend(child_attempts)
+
+        return successful_results, terminal_errors, attempted_errors
+
     def _extract_document_graph(
         self,
         parsed_document: Any,
@@ -930,13 +1062,40 @@ class IngestionPipeline:
                 raise ValueError(
                     "EXTRACTION_CONTEXT_TOKENS must exceed EXTRACTION_OUTPUT_TOKENS"
                 )
-            segments = split_document_input(
+            if settings.EXTRACTION_SEGMENT_MAX_CHARS < 1000:
+                raise ValueError(
+                    "EXTRACTION_SEGMENT_MAX_CHARS must be at least 1000"
+                )
+            if settings.EXTRACTION_SEGMENT_RETRY_DEPTH < 0:
+                raise ValueError(
+                    "EXTRACTION_SEGMENT_RETRY_DEPTH cannot be negative"
+                )
+            # Very large prompts fit the model context but lose facts in the
+            # middle. Cap extraction regions by characters first, then enforce
+            # the provider token budget. Ordinary documents remain one request.
+            character_segments = split_document_input(
                 structured_input,
-                input_token_budget,
-                lambda text: spacy_candidate_extractor.token_count(
-                    text,
-                    parsed_document.language,
-                ),
+                settings.EXTRACTION_SEGMENT_MAX_CHARS,
+                len,
+            )
+            segments = [
+                token_segment
+                for character_segment in character_segments
+                for token_segment in split_document_input(
+                    character_segment,
+                    input_token_budget,
+                    lambda text: spacy_candidate_extractor.token_count(
+                        text,
+                        parsed_document.language,
+                    ),
+                )
+            ]
+            logger.info(
+                "Prepared document graph extraction segments: document_id=%s "
+                "segments=%d max_chars=%d",
+                document_id,
+                len(segments),
+                settings.EXTRACTION_SEGMENT_MAX_CHARS,
             )
             extraction_chain = RunnableLambda(
                 lambda item: entity_extractor.extract_document(item)
@@ -946,31 +1105,22 @@ class IngestionPipeline:
                     "run_name": "document-graph-extraction",
                 }
             )
-            batch_results = extraction_chain.batch(
+            (
+                segment_results,
+                segment_errors,
+                retry_attempt_errors,
+            ) = self._extract_segments_with_retry(
+                extraction_chain,
                 segments,
-                config={
-                    "max_concurrency": settings.LANGCHAIN_MAX_CONCURRENCY,
-                    "metadata": {
-                        "document_id": document_id,
-                        "document_name": document_name,
-                    },
-                },
-                return_exceptions=True,
+                document_id=document_id,
+                document_name=document_name,
             )
-            segment_errors = [
-                result for result in batch_results if isinstance(result, Exception)
-            ]
             if segment_errors:
-                successful_results = [
-                    result
-                    for result in batch_results
-                    if isinstance(result, GraphExtractionResult)
-                ]
                 failed_extraction = self._merge_document_extractions(
-                    successful_results,
+                    segment_results,
                     document_id=document_id,
                 )
-                for error in segment_errors:
+                for error in retry_attempt_errors:
                     failed_extraction.model_responses.extend(
                         getattr(error, "model_responses", [])
                     )
@@ -999,11 +1149,21 @@ class IngestionPipeline:
                     "Use --refresh-extraction to retry, which may incur model charges."
                 ) from segment_errors[0]
 
-            segment_results = batch_results
             extracted = self._merge_document_extractions(
                 segment_results,
                 document_id=document_id,
             )
+            for error in retry_attempt_errors:
+                extracted.model_responses.extend(
+                    getattr(error, "model_responses", [])
+                )
+                extracted.diagnostics.append(
+                    {
+                        "diagnostic_type": "graph_extraction_segment_retried",
+                        "error_type": type(error).__name__,
+                        "error": str(error)[:1000],
+                    }
+                )
             extracted.cache_metadata = {
                 "cache_format_version": CACHE_FORMAT_VERSION,
                 "raw_model_responses_available": bool(extracted.model_responses),
@@ -1248,6 +1408,8 @@ class IngestionPipeline:
             "evidence_match_version": EVIDENCE_MATCH_VERSION,
             "context_tokens": str(settings.EXTRACTION_CONTEXT_TOKENS),
             "output_tokens": str(settings.EXTRACTION_OUTPUT_TOKENS),
+            "segment_max_characters": str(settings.EXTRACTION_SEGMENT_MAX_CHARS),
+            "segment_retry_depth": str(settings.EXTRACTION_SEGMENT_RETRY_DEPTH),
             "minimum_confidence": str(settings.EXTRACTION_MIN_CONFIDENCE),
             "topic_min_confidence": str(settings.TOPIC_MIN_CONFIDENCE),
             "spacy_models": "|".join(

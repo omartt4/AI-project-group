@@ -404,6 +404,56 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertIn("Figure label", document.pages[0].ocr_text)
         self.assertIn("Image OCR", document.pages[0].text)
 
+    def test_arabic_verification_ocr_replaces_corrupted_embedded_text(self) -> None:
+        import pymupdf
+        from graph_rag.ingestion.ocr import OCRResult
+        from graph_rag.ingestion.pdf_parser import PDFParser
+
+        class FakeOCRProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def extract(self, image_bytes, language):
+                self.calls += 1
+                return OCRResult(
+                    text="يشهد الاقتصاد العالمي تحولات كبيرة في السنوات الأخيرة",
+                    confidence=0.91,
+                )
+
+        pdf = pymupdf.open()
+        page = pdf.new_page()
+        page.insert_text(
+            (72, 72),
+            "Corrupted embedded text that is long enough to pass the old length check.",
+        )
+        pdf_bytes = pdf.tobytes()
+        pdf.close()
+        provider = FakeOCRProvider()
+
+        with patch.object(PDFParser, "_needs_full_page_ocr", return_value=True):
+            document = PDFParser(ocr_provider=provider).parse(
+                pdf_bytes,
+                filename="arabic-report.pdf",
+            )
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(document.pages[0].extraction_method, "tesseract_ocr")
+        self.assertEqual(
+            document.pages[0].text,
+            "يشهد الاقتصاد العالمي تحولات كبيرة في السنوات الأخيرة",
+        )
+
+    def test_pdf_quality_checks_arabic_and_generic_office_title(self) -> None:
+        from graph_rag.ingestion.pdf_parser import PDFParser
+
+        self.assertTrue(
+            PDFParser._needs_full_page_ocr(
+                "يشهد الاقتصاد العالمي تحولات كبيرة في السنوات الأخيرة"
+            )
+        )
+        self.assertTrue(PDFParser._is_generic_title("PowerPoint Presentation"))
+        self.assertFalse(PDFParser._is_generic_title("آفاق اقتصادية العدد 57"))
+
     def test_image_parser_uses_replaceable_ocr_provider(self) -> None:
         from graph_rag.ingestion.image_parser import ImageParser
         from graph_rag.ingestion.ocr import OCRResult
@@ -1327,6 +1377,80 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertIsNone(span)
         self.assertEqual(reason, "ambiguous_evidence")
 
+    def test_arabic_evidence_matching_tolerates_small_ocr_error(self) -> None:
+        from graph_rag.graph.entity_extractor import EntityExtractor
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+        )
+
+        source_text = "يشهد الاقتصاد العالمي تحولات كبيرة ومتسارعة."
+        block = SourceBlock(
+            source_ref="page:1",
+            block_type="paragraph",
+            text=source_text,
+            page_number=1,
+        )
+        document = StructuredDocumentInput(
+            document_id="arabic-report",
+            title="آفاق اقتصادية",
+            document_type="report",
+            language="ar",
+            blocks=[block],
+        )
+
+        matched_block, span, reason = EntityExtractor._source_match_details(
+            document,
+            "page:1",
+            "يشهد الاقتصاد العالني تحولات كبيرة ومتسارعة",
+        )
+
+        self.assertIs(matched_block, block)
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(span)
+
+    def test_arabic_node_name_prefers_source_language_and_keeps_alias(self) -> None:
+        from graph_rag.graph.entity_extractor import EntityExtractor
+
+        name, aliases = EntityExtractor._canonical_node_name(
+            "World_Bank",
+            {"name": "World Bank"},
+            ["البنك الدولي", "WB"],
+            "mixed",
+        )
+
+        self.assertEqual(name, "البنك الدولي")
+        self.assertIn("World Bank", aliases)
+        self.assertIn("World_Bank", aliases)
+
+    def test_long_document_is_split_by_character_budget(self) -> None:
+        from graph_rag.ingestion.document_structure import (
+            SourceBlock,
+            StructuredDocumentInput,
+            split_document_input,
+        )
+
+        document = StructuredDocumentInput(
+            document_id="long-report",
+            title="Long report",
+            document_type="report",
+            language="ar",
+            blocks=[
+                SourceBlock(
+                    source_ref=f"page:{index}",
+                    block_type="paragraph",
+                    text=("اقتصاد عالمي وتحول رقمي. " * 500),
+                    page_number=index,
+                )
+                for index in range(1, 7)
+            ],
+        )
+
+        segments = split_document_input(document, 40000, len)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(len(segment.render()) <= 40000 for segment in segments))
+
     def test_graph_extraction_stores_the_original_arabic_evidence_quote(self) -> None:
         from types import SimpleNamespace
         from graph_rag.graph.entity_extractor import EntityExtractor
@@ -1346,6 +1470,13 @@ class StructuredFileParserTests(unittest.TestCase):
             },
         )
         graph_document = SimpleNamespace(nodes=[entity], relationships=[])
+        bound_options = {}
+
+        class BindableChatModel:
+            def bind(self, **kwargs):
+                bound_options.update(kwargs)
+                return self
+
         document = StructuredDocumentInput(
             document_id="arabic-report",
             title="Arabic report",
@@ -1384,9 +1515,13 @@ class StructuredFileParserTests(unittest.TestCase):
             ),
         ):
             result = EntityExtractor(
-                client=SimpleNamespace(as_chat_model=lambda: object())
+                client=SimpleNamespace(as_chat_model=lambda: BindableChatModel())
             ).extract_document(document)
 
+        self.assertEqual(
+            bound_options["max_tokens"],
+            settings.EXTRACTION_OUTPUT_TOKENS,
+        )
         self.assertEqual(result.entities[0].evidence, source_text[:-1])
         self.assertEqual(
             result.entities[0].provenance["source_offsets"],

@@ -474,3 +474,27 @@ graph-rag/
 When an upload is rejected, the UI displays a clear notice with the matching existing paper's title and hash. When accepted, the document is saved into `pdfs/`, vector and graph databases are updated, and its record is appended to `metadata.csv`.
 
 ---
+## Offline Retrieval Evaluation
+
+The live dashboard uses an LLM judge for faithfulness, answer relevance, and
+context relevance. Deterministic retrieval evaluation is separate and compares
+retrieved pages, entities, and relations with a human-reviewed JSONL gold set.
+
+Run a one-question smoke test first:
+
+```powershell
+uv run python scripts/evaluate_retrieval.py --mode all --limit 1
+```
+
+Then evaluate the full dataset:
+
+```powershell
+uv run python scripts/evaluate_retrieval.py --mode all
+```
+
+The default report is written to
+`data/evaluation_reports/retrieval_report.json`. The evaluator calculates
+Hit Rate@K, Precision@K, Recall@K, MRR, Entity Recall, Relation Recall, and
+False Retrieval Rate. It never calls the chat or evaluation model. Vector and
+hybrid modes still make one embedding request per evaluated question; graph-only
+mode makes no model request.

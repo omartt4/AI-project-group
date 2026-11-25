@@ -22,7 +22,11 @@ class GraphQueries:
         query = """
         MATCH (e:Entity)
         WHERE e.dataset_id = $dataset_id
-          AND toLower(e.name) CONTAINS toLower($kw)
+          AND (
+              toLower(e.name) CONTAINS toLower($kw)
+              OR any(alias IN coalesce(e.aliases, [])
+                     WHERE toLower(alias) CONTAINS toLower($kw))
+          )
         RETURN e.name AS name, e.category AS category, e.description AS description
         LIMIT $limit
         """
@@ -55,10 +59,14 @@ class GraphQueries:
 
         query = """
         MATCH (e:Entity {name: $name, dataset_id: $dataset_id})-[r]-(neighbor)
-        WHERE neighbor.dataset_id = $dataset_id AND (neighbor:Entity OR neighbor:Paper)
+        WHERE neighbor.dataset_id = $dataset_id
+          AND (neighbor:Entity OR neighbor:Document OR neighbor:Paper)
         RETURN e.name AS source, coalesce(r.relation_type, type(r)) AS relation,
                coalesce(neighbor.name, neighbor.title) AS target,
-               CASE WHEN neighbor:Paper THEN 'Paper' ELSE neighbor.category END AS target_category
+               CASE
+                   WHEN neighbor:Document OR neighbor:Paper THEN 'Document'
+                   ELSE neighbor.category
+               END AS target_category
         LIMIT 15
         """
         relationships = []
@@ -89,11 +97,13 @@ class GraphQueries:
             return []
 
         query = """
-        MATCH (p:Paper)-[r]->(e:Entity)
-        WHERE p.dataset_id = $dataset_id
+        MATCH (p)-[r]->(e:Entity)
+        WHERE (p:Document OR p:Paper)
+          AND p.dataset_id = $dataset_id
           AND e.dataset_id = $dataset_id
           AND e.name IN $names
-        RETURN DISTINCT p.paper_id AS document_name, p.title AS title
+        RETURN DISTINCT coalesce(p.document_name, p.paper_id) AS document_name,
+                        p.title AS title
         LIMIT 10
         """
         docs = []

@@ -7,6 +7,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 
 from langchain_core.documents import Document as LangChainDocument
@@ -239,6 +240,16 @@ from one source region), source_ref (that region's exact reference), confidence
 relationship must have exact evidence, source_ref, confidence, and a concise
 description. Use properties as key/value strings.
 
+Return each distinct semantic fact once. Keep evidence to the shortest exact
+quote that proves the fact, keep descriptions to one short sentence, and omit
+decorative or repeated properties. Prefer a smaller complete JSON object over
+repeating the same entity, relationship, alias, mention, or evidence.
+
+Every semantic node must also have a name property. Keep name in the dominant
+language and script used by the source evidence. Put translated, transliterated,
+abbreviated, and alternate names in aliases. The node id is a stable internal
+identifier and must not be used as a substitute for the source-language name.
+
 Represent topics as nodes of type Topic with evidence, source_ref, confidence,
 and aliases. Represent a supported parent-child topic hierarchy with a
 PARENT_OF relationship between Topic nodes. Do not force a hierarchy.
@@ -254,7 +265,9 @@ ids. Return a JSON object with "nodes" and "relationships" arrays. Each node
 has "id", "type", and "properties"; each relationship has "source_node_id",
 "source_node_type", "target_node_id", "target_node_type", "type", and
 "properties". Properties are arrays of {{"key": "...", "value": "..."}} strings.
-Use arbitrary property keys only for grounded data.""",
+Every property entry must contain both a key and a non-null string value.
+Never nest the top-level relationships array inside a node or property. Use
+arbitrary property keys only for grounded data.""",
         ),
         ("human", "{input}"),
     ]
@@ -481,8 +494,81 @@ class EntityExtractor:
         if len(matches) == 1:
             return matches[0][0], matches[0][1], ""
         if matches:
+            # A precise source_ref already identifies the evidence region. If the
+            # same quote occurs twice inside that one region, the first occurrence
+            # is sufficient provenance and does not make the fact ambiguous.
+            if source_ref and len(candidates) == 1:
+                return matches[0][0], matches[0][1], ""
             return None, None, "ambiguous_evidence"
+
+        fuzzy_matches = []
+        if len(normalized_evidence) >= 12 and len(normalized_evidence.split()) >= 2:
+            expected_tokens = len(normalized_evidence.split())
+            for block in candidates:
+                normalized_source, source_starts, source_ends = _normalize_evidence_text(
+                    block.text
+                )
+                token_spans = [
+                    match.span() for match in re.finditer(r"\S+", normalized_source)
+                ]
+                for window_size in range(
+                    max(2, expected_tokens - 2),
+                    expected_tokens + 3,
+                ):
+                    for start_index in range(0, len(token_spans) - window_size + 1):
+                        normalized_start = token_spans[start_index][0]
+                        normalized_end = token_spans[start_index + window_size - 1][1]
+                        candidate_text = normalized_source[normalized_start:normalized_end]
+                        score = SequenceMatcher(
+                            None,
+                            normalized_evidence,
+                            candidate_text,
+                            autojunk=False,
+                        ).ratio()
+                        if score >= 0.86:
+                            fuzzy_matches.append(
+                                (
+                                    score,
+                                    block,
+                                    (
+                                        source_starts[normalized_start],
+                                        source_ends[normalized_end - 1],
+                                    ),
+                                )
+                            )
+            fuzzy_matches.sort(key=lambda item: item[0], reverse=True)
+            if fuzzy_matches:
+                best = fuzzy_matches[0]
+                second_score = fuzzy_matches[1][0] if len(fuzzy_matches) > 1 else 0.0
+                if source_ref or best[0] - second_score >= 0.03:
+                    return best[1], best[2], ""
         return None, None, "evidence_not_found"
+
+    @staticmethod
+    def _canonical_node_name(
+        node_id: Any,
+        properties: Dict[str, Any],
+        aliases: List[str],
+        language: str,
+    ) -> tuple[str, List[str]]:
+        """Keep the source-language label while retaining every searchable alias."""
+        node_name = " ".join(str(node_id or "").split())
+        property_name = " ".join(str(properties.get("name") or "").split())
+        candidates = [property_name, *aliases, node_name]
+        candidates = [value for value in candidates if value]
+
+        def contains_arabic(value: str) -> bool:
+            return any("ARABIC" in unicodedata.name(char, "") for char in value)
+
+        name = property_name or node_name
+        if language in {"ar", "mixed"}:
+            arabic_name = next((value for value in candidates if contains_arabic(value)), "")
+            if arabic_name:
+                name = arabic_name
+        searchable_aliases = list(
+            dict.fromkeys(value for value in candidates if value and value != name)
+        )
+        return name, searchable_aliases
 
     @staticmethod
     def _source_provenance(
@@ -542,8 +628,13 @@ class EntityExtractor:
         if not hasattr(self.client, "as_chat_model"):
             raise RuntimeError("The configured extraction client must expose a LangChain chat model")
 
+        chat_model = self.client.as_chat_model()
+        if hasattr(chat_model, "bind"):
+            chat_model = chat_model.bind(
+                max_tokens=settings.EXTRACTION_OUTPUT_TOKENS,
+            )
         transformer = LLMGraphTransformer(
-            llm=JsonModeChatModel(self.client.as_chat_model()),
+            llm=JsonModeChatModel(chat_model),
             allowed_nodes=[],
             allowed_relationships=[],
             prompt=GRAPH_TRANSFORMER_PROMPT,
@@ -622,7 +713,15 @@ class EntityExtractor:
                     properties.get("document_type") or document.document_type
                 ).strip() or "unknown"
                 continue
-            name = " ".join(str(node.id or "").split())
+            aliases = self._property(properties, "aliases", [])
+            if not isinstance(aliases, list):
+                aliases = [str(aliases)] if aliases else []
+            name, aliases = self._canonical_node_name(
+                node.id,
+                properties,
+                [str(value) for value in aliases if str(value).strip()],
+                document.language,
+            )
             evidence = str(properties.get("evidence") or "").strip()
             source_ref = str(properties.get("source_ref") or "").strip()
             confidence = _confidence(properties.get("confidence"))
@@ -665,9 +764,6 @@ class EntityExtractor:
             key = (node.id, node_type.casefold())
             nodes[key] = node
             if node_type.casefold() == "topic":
-                aliases = self._property(properties, "aliases", [])
-                if isinstance(aliases, str):
-                    aliases = [aliases]
                 result.topics.append(
                     ExtractedTopic(
                         name=name,
@@ -681,15 +777,12 @@ class EntityExtractor:
                 topic_ids[key] = name
                 continue
 
-            aliases = self._property(properties, "aliases", [])
             attributes = self._property(properties, "attributes", {})
-            if not isinstance(aliases, list):
-                aliases = [str(aliases)] if aliases else []
             if not isinstance(attributes, dict):
                 attributes = {}
             reserved = {
                 "evidence", "source_ref", "confidence", "aliases",
-                "attributes", "mentions", "description",
+                "attributes", "mentions", "description", "name",
             }
             attributes.update(
                 {
