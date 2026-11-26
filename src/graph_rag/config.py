@@ -32,13 +32,15 @@ class Settings:
     )
     MODEL_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     EXTRACTION_MODEL: str = os.getenv(
-        "OPENROUTER_EXTRACTION_MODEL", _LEGACY_LLM_MODEL
+        "OPENROUTER_EXTRACTION_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
     )
-    CHAT_MODEL: str = os.getenv("OPENROUTER_CHAT_MODEL", _LEGACY_LLM_MODEL)
+    CHAT_MODEL: str = os.getenv(
+        "OPENROUTER_CHAT_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
+    )
     EVALUATION_MODEL: str = os.getenv(
-        "OPENROUTER_EVAL_MODEL", _LEGACY_LLM_MODEL
+        "OPENROUTER_EVAL_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
     )
-    EMBEDDING_MODEL: str = os.getenv("OPENROUTER_EMBED_MODEL", "")
+    EMBEDDING_MODEL: str = os.getenv("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-8b")
     EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "0"))
     MODEL_TIMEOUT_SECONDS: float = float(os.getenv("MODEL_TIMEOUT_SECONDS", "120.0"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "2"))
@@ -47,6 +49,17 @@ class Settings:
     )
     OPENROUTER_SITE_URL: str = os.getenv("OPENROUTER_SITE_URL", "")
     OPENROUTER_APP_NAME: str = os.getenv("OPENROUTER_APP_NAME", "Graph RAG Studio")
+
+    # ── LangSmith & Observability Settings ──
+    LANGCHAIN_TRACING_V2: bool = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() in ("true", "1", "yes")
+    LANGCHAIN_API_KEY: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
+    LANGCHAIN_PROJECT: str = os.getenv("LANGCHAIN_PROJECT", "graph-rag")
+    LANGCHAIN_ENDPOINT: str = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+
+    # ── Cost Limits & Budget Thresholds ──
+    HARD_COST_LIMIT_USD: float = float(os.getenv("HARD_COST_LIMIT_USD", "10.0"))
+    COST_WARNING_THRESHOLD_USD: float = float(os.getenv("COST_WARNING_THRESHOLD_USD", "5.0"))
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
 
     # ── Neo4j Settings ──
     NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -124,9 +137,29 @@ class Settings:
     APP_LOG_FILE: Path = PROJECT_ROOT / os.getenv("APP_LOG_FILE", "data/app.log")
 
     def ensure_directories(self) -> None:
-        """Create required runtime directories if they don't exist."""
+        """Create required runtime directories if they don't exist and validate env."""
         if self.LANGCHAIN_MAX_CONCURRENCY < 1:
             raise ValueError("LANGCHAIN_MAX_CONCURRENCY must be at least 1")
+        
+        # Enforce secure configuration in production
+        if self.ENVIRONMENT in ("production", "prod"):
+            if "dev-secret-key" in self.JWT_SECRET_KEY or len(self.JWT_SECRET_KEY) < 32:
+                raise ValueError("In production, JWT_SECRET_KEY must be a secure random key with at least 32 characters.")
+            if self.NEO4J_PASSWORD in ("password123", ""):
+                raise ValueError("In production, default NEO4J_PASSWORD is not allowed.")
+            if not self.MODEL_API_KEY:
+                raise ValueError("In production, MODEL_API_KEY / OPENROUTER_API_KEY must be set.")
+
+        # LangSmith setup
+        if self.LANGCHAIN_TRACING_V2:
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+            if self.LANGCHAIN_API_KEY:
+                os.environ["LANGCHAIN_API_KEY"] = self.LANGCHAIN_API_KEY
+            if self.LANGCHAIN_PROJECT:
+                os.environ["LANGCHAIN_PROJECT"] = self.LANGCHAIN_PROJECT
+            if self.LANGCHAIN_ENDPOINT:
+                os.environ["LANGCHAIN_ENDPOINT"] = self.LANGCHAIN_ENDPOINT
+
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
         self.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
