@@ -159,6 +159,20 @@ class VectorStore:
         """Return total number of chunks currently stored in ChromaDB."""
         return self.collection.count()
 
+    def get_indexed_documents(self) -> set[str]:
+        """Return the set of document names stored in ChromaDB."""
+        try:
+            results = self.collection.get(include=["metadatas"])
+            metadatas = results.get("metadatas") or []
+            return {
+                str(m.get("document_name"))
+                for m in metadatas
+                if m and m.get("document_name")
+            }
+        except Exception as exc:
+            logger.warning("Could not list ChromaDB indexed documents: %s", exc)
+            return set()
+
     def get_document_chunk_count(self, document_name: str) -> int:
         """Return stored chunk count for one exact document filename."""
         rows = self.collection.get(

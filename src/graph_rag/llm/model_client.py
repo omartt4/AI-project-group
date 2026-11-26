@@ -16,6 +16,8 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import OpenAIEmbeddings
 from langchain_openrouter import ChatOpenRouter
+from openrouter.sdk import OpenRouter
+from openrouter.utils.retries import BackoffStrategy, RetryConfig
 
 from graph_rag.config import settings
 from graph_rag.llm.cost_tracker import cost_tracker
@@ -31,9 +33,19 @@ class ModelConfigurationError(RuntimeError):
 class ModelRequestContext:
     """Context shared by model calls participating in one user or ingest run."""
 
-    def __init__(self, run_id: str | None = None, user_id: int | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str | None = None,
+        user_id: int | None = None,
+        document_id: str | None = None,
+        query_id: str | None = None,
+        language: str | None = None,
+    ) -> None:
         self.run_id = run_id
         self.user_id = user_id
+        self.document_id = document_id
+        self.query_id = query_id
+        self.language = language
 
 
 _request_context: ContextVar[ModelRequestContext] = ContextVar(
@@ -43,9 +55,23 @@ _request_context: ContextVar[ModelRequestContext] = ContextVar(
 
 
 @contextmanager
-def model_request_context(run_id: str | None = None, user_id: int | None = None):
+def model_request_context(
+    run_id: str | None = None,
+    user_id: int | None = None,
+    document_id: str | None = None,
+    query_id: str | None = None,
+    language: str | None = None,
+):
     """Attach correlation identifiers to nested LangChain and embedding calls."""
-    token = _request_context.set(ModelRequestContext(run_id=run_id, user_id=user_id))
+    token = _request_context.set(
+        ModelRequestContext(
+            run_id=run_id,
+            user_id=user_id,
+            document_id=document_id,
+            query_id=query_id,
+            language=language,
+        )
+    )
     try:
         yield
     finally:
@@ -227,6 +253,9 @@ class ModelUsageCallbackHandler(BaseCallbackHandler):
             request_id=self.request_id,
             run_id=self.context.run_id,
             user_id=self.context.user_id,
+            document_id=self.context.document_id,
+            query_id=self.context.query_id,
+            language=self.context.language,
             latency_ms=int((time.perf_counter() - started) * 1000),
             status=status,
             error_message=error_message,
@@ -283,9 +312,29 @@ class CloudModelClient:
                 "matching OPENROUTER_*_MODEL value in .env."
             )
         if self._chat_model_instance is None:
+            # Configure bounded exponential backoff and Retry-After awareness
+            retry_config = RetryConfig(
+                strategy="backoff",
+                backoff=BackoffStrategy(
+                    initial_interval=500,
+                    max_interval=10000,
+                    exponent=2.0,
+                    max_elapsed_time=int(self.timeout_seconds * 1000),
+                ),
+                retry_connection_errors=True,
+            )
+            sdk_client = OpenRouter(
+                api_key=self._require_api_key(),
+                server_url=self.base_url,
+                http_referer=settings.OPENROUTER_SITE_URL or None,
+                x_open_router_title=settings.OPENROUTER_APP_NAME,
+                retry_config=retry_config,
+                timeout_ms=int(self.timeout_seconds * 1000),
+            )
             self._chat_model_instance = ChatOpenRouter(
                 model=self.llm_model,
                 api_key=self._require_api_key(),
+                client=sdk_client,
                 base_url=self.base_url,
                 temperature=0.2,
                 timeout=int(self.timeout_seconds * 1000),
@@ -355,10 +404,14 @@ class CloudModelClient:
         user_id: int | None = None,
     ) -> str:
         """Generate text through a LangChain prompt/model Runnable sequence."""
+        cost_tracker.check_cost_limits()
         context = _request_context.get()
         request_id = uuid.uuid4().hex
         request_run_id = run_id or context.run_id
         request_user_id = user_id if user_id is not None else context.user_id
+        request_doc_id = context.document_id
+        request_query_id = context.query_id
+        request_language = context.language
         started = time.perf_counter()
         try:
             model = self._get_chat_model().bind(temperature=temperature)
@@ -380,6 +433,9 @@ class CloudModelClient:
                         "model": self.llm_model or "",
                         "run_id": request_run_id or "",
                         "user_id": request_user_id or "",
+                        "document_id": request_doc_id or "",
+                        "query_id": request_query_id or "",
+                        "language": request_language or "",
                     },
                 },
             )
@@ -402,6 +458,9 @@ class CloudModelClient:
                 request_id=request_id,
                 run_id=request_run_id,
                 user_id=request_user_id,
+                document_id=request_doc_id,
+                query_id=request_query_id,
+                language=request_language,
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 status="failed",
                 error_message=str(exc),
@@ -417,6 +476,9 @@ class CloudModelClient:
             request_id=request_id,
             run_id=request_run_id,
             user_id=request_user_id,
+            document_id=request_doc_id,
+            query_id=request_query_id,
+            language=request_language,
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
         return content.strip()
@@ -478,6 +540,7 @@ class CloudModelClient:
             )
             raise
 
+        cost_tracker.check_cost_limits()
         embeddings: List[List[float]] = []
         chunk_size = max(1, int(model.chunk_size))
         for start_index in range(0, len(texts), chunk_size):
@@ -526,6 +589,9 @@ class CloudModelClient:
                     request_id=request_id,
                     run_id=context.run_id,
                     user_id=context.user_id,
+                    document_id=context.document_id,
+                    query_id=context.query_id,
+                    language=context.language,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     status="failed",
                     error_message=str(exc),
@@ -540,6 +606,9 @@ class CloudModelClient:
                 request_id=request_id,
                 run_id=context.run_id,
                 user_id=context.user_id,
+                document_id=context.document_id,
+                query_id=context.query_id,
+                language=context.language,
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
         return embeddings

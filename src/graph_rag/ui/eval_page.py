@@ -11,6 +11,8 @@ import json
 import streamlit as st
 import pandas as pd
 from graph_rag.evaluation.eval_service import eval_service
+from graph_rag.llm.cost_tracker import cost_tracker
+from graph_rag.ingestion.pipeline import pipeline
 
 
 def _format_percent(value: float | None) -> str:
@@ -74,6 +76,32 @@ def render_eval_page() -> None:
         st.caption("Evaluation attempts are recorded, but no valid scores are available.")
     elif scored_evals < total_evals:
         st.caption(f"Scores are available for {scored_evals} of {total_evals} evaluation attempts.")
+
+    st.divider()
+
+    # ── Infrastructure Observability, Consistency & Cost Breakdown ──
+    st.markdown("#### 🔬 Infrastructure Observability & Consistency")
+    c_cons, c_report = st.columns([1, 1])
+    with c_cons:
+        st.markdown("**Cross-Store Recovery & Consistency Check**")
+        if st.button("🔄 Run Consistency Check"):
+            report = pipeline.check_cross_store_consistency()
+            if report.get("consistent"):
+                st.success("✅ ChromaDB and Neo4j are fully synchronized!")
+            else:
+                st.warning("⚠️ Discrepancy detected between stores!")
+            st.json(report)
+        else:
+            st.caption("Click above to compare ChromaDB chunks, Neo4j Document nodes, and active ingestion journals.")
+
+    with c_report:
+        st.markdown("**Cost Summaries by Dimension**")
+        dim = st.selectbox("Group By", ["Document", "Query", "Language"])
+        summary_rows = cost_tracker.summary_by_dimension(dim.lower())
+        if summary_rows:
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+        else:
+            st.caption("No multi-dimensional usage recorded yet.")
 
     st.divider()
 

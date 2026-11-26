@@ -10,9 +10,13 @@ Provides:
 import streamlit as st
 from collections import Counter
 from graph_rag.chat.chat_service import chat_service
+from graph_rag.config import settings
 from graph_rag.embeddings.vector_store import vector_store
 from graph_rag.graph.graph_builder import graph_builder
 from graph_rag.ingestion.metadata_manager import metadata_manager
+from graph_rag.ingestion.ocr import TesseractOCRProvider
+from graph_rag.ingestion.pipeline import pipeline
+from graph_rag.ingestion.spacy_candidates import spacy_candidate_extractor
 from graph_rag.llm.cost_tracker import cost_tracker
 
 CUSTOM_CSS = """
@@ -204,7 +208,7 @@ def render_sidebar() -> None:
         if language_counts:
             st.caption(
                 "Detected languages: "
-                + ", ".join(sorted(language_counts))
+                + ", ".join(f"{lang} ({cnt})" for lang, cnt in sorted(language_counts.items()))
             )
         st.markdown(f"🧩 **{chunk_count}** Vector Chunks")
         if neo4j_stats.get("status") == "online":
@@ -218,14 +222,31 @@ def render_sidebar() -> None:
         else:
             st.caption("🕸️ Neo4j Graph (Offline)")
 
+        # Engine Capabilities & Diagnostics
+        ocr_avail = TesseractOCRProvider().is_available()
+        spacy_avail = spacy_candidate_extractor.is_available()
+        st.caption(
+            f"🛠️ **OCR (Tesseract)**: {'✅ Available' if ocr_avail else '⚠️ Fallback to embedded text'}  \n"
+            f"🧠 **NLP (spaCy)**: {'✅ Active' if spacy_avail else '⚠️ Lexical fallback'}  \n"
+            f"⚡ **Rate Limit / Concurrency**: {settings.LANGCHAIN_MAX_CONCURRENCY} workers"
+        )
+
         try:
             usage = cost_tracker.summary()
-            st.markdown(f"💵 **${usage['cost_usd']:.8f}** Calculated API Cost")
+            total_cost = usage.get('cost_usd', 0.0)
+            st.markdown(f"💵 **${total_cost:.6f}** API Cost")
+            cached_tokens = usage.get('cached_tokens', 0)
+            cached_token_str = f" · {cached_tokens:,} cached tokens" if cached_tokens else ""
             st.caption(
-                f"{usage['requests']} successful requests · "
+                f"{usage['requests']} successful · "
                 f"{usage['failed_requests']} failed · "
-                f"{usage['total_tokens']:,} known tokens"
+                f"{usage['total_tokens']:,} tokens{cached_token_str}"
             )
+            # Budget and Threshold warnings
+            if total_cost >= settings.HARD_COST_LIMIT_USD:
+                st.error(f"🛑 Hard cost limit exceeded (${total_cost:.4f} >= ${settings.HARD_COST_LIMIT_USD:.4f})")
+            elif total_cost >= settings.COST_WARNING_THRESHOLD_USD:
+                st.warning(f"⚠️ Cost warning threshold exceeded (${total_cost:.4f} >= ${settings.COST_WARNING_THRESHOLD_USD:.4f})")
             if usage["unknown_cost_requests"]:
                 st.caption(
                     f"⚠️ {usage['unknown_cost_requests']} request(s) have unknown "
@@ -255,7 +276,7 @@ def render_sidebar() -> None:
                                 f"{int(row['unknown_cost_requests'])} {row['role']} "
                                 "request(s) have unknown cost"
                             )
-                    st.caption("Recent model requests")
+                    st.caption("Recent model requests (cost & cache)")
                     for row in cost_tracker.recent(limit=8):
                         cost_label = (
                             f"${float(row['cost_usd']):.6f}"
@@ -267,6 +288,7 @@ def render_sidebar() -> None:
                             if row["total_tokens"] is not None
                             else "tokens unknown"
                         )
+                        cached_label = f" ({row.get('cached_tokens', 0)} cached)" if row.get("cached_tokens") else ""
                         provider_cost_label = (
                             f" · provider ${float(row['provider_cost_usd']):.8f}"
                             if row["provider_cost_usd"] is not None
@@ -274,11 +296,11 @@ def render_sidebar() -> None:
                         )
                         st.write(
                             f"{row['role']} · {row['model']} · "
-                            f"{row['status']} · {token_label} · "
-                            f"calculated {cost_label} ({row['cost_method']})"
+                            f"{row['status']} · {token_label}{cached_label} · "
+                            f"cost {cost_label} ({row['cost_method']})"
                             f"{provider_cost_label} · "
-                            f"cache {row['cache_status']} · "
-                            f"run {row['run_id'] or '-'} · request {row['request_id']}"
+                            f"cache: {row['cache_status']} · "
+                            f"latency: {row.get('latency_ms', 0)}ms"
                         )
                         if row["error_message"]:
                             st.caption(row["error_message"])

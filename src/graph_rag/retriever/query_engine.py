@@ -121,7 +121,7 @@ class QueryEngine:
         logger.info("Query started: session_id=%s user_id=%s question=%r", session_id, user_id, question[:2000])
 
         # Stage 1: Adaptive Hybrid Retrieval (Query Classification + Dynamic K + MMR + Graph Discovery)
-        with model_request_context(run_id=run_id, user_id=user_id):
+        with model_request_context(run_id=run_id, user_id=user_id, query_id=str(session_id or "")):
             with StageTimer() as ret_timer:
                 retrieval_res = self.retriever.adaptive_retrieve(query=question)
         latency.retrieval_ms = ret_timer.elapsed_ms
@@ -151,7 +151,7 @@ class QueryEngine:
         with StageTimer() as gen_timer:
             generation_succeeded = True
             try:
-                with model_request_context(run_id=run_id, user_id=user_id):
+                with model_request_context(run_id=run_id, user_id=user_id, query_id=str(session_id or "")):
                     answer = self.llm.generate(
                         prompt=user_prompt,
                         system_prompt=sys_prompt,

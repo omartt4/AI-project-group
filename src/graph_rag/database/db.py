@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS model_usage (
     prompt_tokens       INTEGER,
     completion_tokens   INTEGER,
     total_tokens        INTEGER,
+    cached_tokens       INTEGER DEFAULT 0,
     cost_usd            REAL,
     provider_cost_usd   REAL,
     input_rate_usd_per_million REAL,
@@ -107,6 +108,9 @@ CREATE TABLE IF NOT EXISTS model_usage (
     request_id          TEXT,
     run_id              TEXT,
     user_id             INTEGER,
+    document_id         TEXT,
+    query_id            TEXT,
+    language            TEXT,
     latency_ms          INTEGER,
     status              TEXT NOT NULL DEFAULT 'success',
     retry_count         INTEGER,
@@ -287,6 +291,10 @@ def init_db() -> None:
             for row in conn.execute("PRAGMA table_info(model_usage)").fetchall()
         }
         migrations = {
+            "cached_tokens": "INTEGER DEFAULT 0",
+            "document_id": "TEXT",
+            "query_id": "TEXT",
+            "language": "TEXT",
             "request_id": "TEXT",
             "run_id": "TEXT",
             "user_id": "INTEGER",

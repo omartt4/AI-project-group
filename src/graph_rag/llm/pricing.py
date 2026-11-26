@@ -32,6 +32,18 @@ class CostCalculation:
 
 
 MODEL_PRICING = {
+    "nvidia/nemotron-3.5-lightning:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
+    "liquid/lfm-3-1.7b:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
+    "baidu/ernie-5.5-flash-preview:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
     "google/gemma-4-31b-it:free": ModelPricing(
         input_usd_per_million=Decimal("0"),
         output_usd_per_million=Decimal("0"),

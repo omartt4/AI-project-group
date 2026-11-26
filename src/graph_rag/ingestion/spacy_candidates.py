@@ -31,6 +31,14 @@ class SpacyCandidateExtractor:
         self._spacy_import_error: Exception | None = None
         self._warned_capabilities: set[str] = set()
 
+    def is_available(self) -> bool:
+        """Check if spaCy runtime can be initialized."""
+        try:
+            self._get_spacy()
+            return True
+        except Exception:
+            return False
+
     def _get_spacy(self) -> Any:
         if self._spacy_module is not None:
             return self._spacy_module

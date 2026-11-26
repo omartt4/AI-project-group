@@ -18,6 +18,16 @@ class OCRResult:
 
 
 class OCRProvider(Protocol):
+    def is_available(self) -> bool:
+        """Check if pytesseract and the underlying binary are available."""
+        try:
+            import pytesseract
+            self._configure_windows_executable(pytesseract)
+            version = pytesseract.get_tesseract_version()
+            return bool(version)
+        except Exception:
+            return False
+
     def extract(self, image_bytes: bytes, language: str) -> OCRResult:
         """Recognize text in an image and return provenance when available."""
 
@@ -46,6 +56,16 @@ class TesseractOCRProvider:
             if candidate and Path(candidate).is_file():
                 pytesseract_module.pytesseract.tesseract_cmd = candidate
                 return
+
+    def is_available(self) -> bool:
+        """Check if pytesseract and the underlying binary are available."""
+        try:
+            import pytesseract
+            self._configure_windows_executable(pytesseract)
+            version = pytesseract.get_tesseract_version()
+            return bool(version)
+        except Exception:
+            return False
 
     def extract(self, image_bytes: bytes, language: str) -> OCRResult:
         try:

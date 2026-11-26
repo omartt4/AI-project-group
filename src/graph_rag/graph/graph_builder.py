@@ -956,6 +956,25 @@ class GraphBuilder:
                 "topics": 0, "subtopics": 0, "status": "error",
             }
 
+    def get_indexed_documents(self) -> set[str]:
+        """Return the set of document IDs or names present in Neo4j."""
+        driver = self.get_driver()
+        if not driver:
+            return set()
+        try:
+            with driver.session(database=self.database) as session:
+                records = session.run(
+                    """
+                    MATCH (d:Document {dataset_id: $dataset_id})
+                    RETURN coalesce(d.document_id, d.name) AS doc_id
+                    """,
+                    dataset_id=self.dataset_id,
+                )
+                return {str(record["doc_id"]) for record in records if record["doc_id"]}
+        except Exception as exc:
+            logger.warning("Could not list Neo4j indexed documents: %s", exc)
+            return set()
+
     def close(self) -> None:
         if self._driver:
             self._driver.close()
