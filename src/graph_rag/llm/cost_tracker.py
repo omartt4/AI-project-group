@@ -6,14 +6,47 @@ import logging
 import math
 from typing import Any, Dict
 
+from graph_rag.config import settings
 from graph_rag.database.db import get_db_connection
 from graph_rag.llm.pricing import PRICING_VERSION, calculate_cost_usd
 
 logger = logging.getLogger(__name__)
 
 
+class CostLimitExceededError(RuntimeError):
+    """Raised when hard cost limits are exceeded."""
+
+
 class CostTracker:
     """Store per-request model usage, latency, and outcome."""
+
+    def check_cost_limits(self) -> None:
+        """Verify whether total accumulated cost has exceeded warning or hard limits."""
+        total_spent = self.get_total_cost_usd()
+        if total_spent >= settings.HARD_COST_LIMIT_USD:
+            raise CostLimitExceededError(
+                f"Hard cost limit reached: accumulated spend is ${total_spent:.4f} USD, "
+                f"which exceeds the configured HARD_COST_LIMIT_USD of ${settings.HARD_COST_LIMIT_USD:.4f}."
+            )
+        if total_spent >= settings.COST_WARNING_THRESHOLD_USD:
+            logger.warning(
+                "Cost warning threshold reached: accumulated spend is $%.4f USD "
+                "(threshold: $%.4f USD, hard limit: $%.4f USD).",
+                total_spent,
+                settings.COST_WARNING_THRESHOLD_USD,
+                settings.HARD_COST_LIMIT_USD,
+            )
+
+    def get_total_cost_usd(self) -> float:
+        """Return the total accumulated cost recorded across all requests."""
+        try:
+            with get_db_connection() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) AS total_cost FROM model_usage"
+                ).fetchone()
+            return float(row["total_cost"] if row else 0.0)
+        except Exception:
+            return 0.0
 
     def record(
         self,
@@ -26,6 +59,9 @@ class CostTracker:
         request_id: str,
         run_id: str | None = None,
         user_id: int | None = None,
+        document_id: str | None = None,
+        query_id: str | None = None,
+        language: str | None = None,
         latency_ms: int | None = None,
         status: str = "success",
         retry_count: int | None = None,
@@ -37,6 +73,9 @@ class CostTracker:
         )
         completion_tokens = self._optional_int(
             usage.get("completion_tokens", usage.get("output_tokens"))
+        )
+        cached_tokens = self._optional_int(
+            usage.get("cached_tokens", usage.get("prompt_tokens_details", {}).get("cached_tokens") if isinstance(usage.get("prompt_tokens_details"), dict) else None)
         )
         total_tokens = self._optional_int(usage.get("total_tokens"))
         if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
@@ -58,12 +97,12 @@ class CostTracker:
                     """
                     INSERT INTO model_usage
                     (role, operation, model, endpoint, prompt_tokens,
-                    completion_tokens, total_tokens, cost_usd,
+                    completion_tokens, total_tokens, cached_tokens, cost_usd,
                     provider_cost_usd, input_rate_usd_per_million,
                     output_rate_usd_per_million, cost_method, pricing_version,
-                    request_id, run_id, user_id, latency_ms, status, retry_count,
-                    cache_status, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    request_id, run_id, user_id, document_id, query_id, language,
+                    latency_ms, status, retry_count, cache_status, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         role,
@@ -73,6 +112,7 @@ class CostTracker:
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
+                        cached_tokens or 0,
                         cost_usd,
                         provider_cost_usd,
                         (
@@ -90,6 +130,9 @@ class CostTracker:
                         request_id,
                         run_id,
                         user_id,
+                        document_id,
+                        query_id,
+                        language,
                         latency_ms,
                         status,
                         retry_count,
@@ -160,6 +203,7 @@ class CostTracker:
                        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS requests,
                        SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS failed_requests,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                        COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
                        COALESCE(SUM(provider_cost_usd), 0.0) AS provider_cost_usd,
                        SUM(CASE WHEN cost_usd IS NULL
@@ -180,6 +224,7 @@ class CostTracker:
                 int(row["failed_requests"] or 0) for row in breakdown
             ),
             "total_tokens": sum(int(row["total_tokens"] or 0) for row in breakdown),
+            "cached_tokens": sum(int(row["cached_tokens"] or 0) for row in breakdown),
             "cost_usd": sum(float(row["cost_usd"] or 0.0) for row in breakdown),
             "provider_cost_usd": sum(
                 float(row["provider_cost_usd"] or 0.0) for row in breakdown
@@ -192,6 +237,30 @@ class CostTracker:
             ),
             "breakdown": breakdown,
         }
+
+    def summary_by_dimension(self, dimension: str = "document") -> list[Dict[str, Any]]:
+        """Return cost summaries grouped by document, query, or language."""
+        col_map = {
+            "document": "document_id",
+            "query": "query_id",
+            "language": "language",
+        }
+        col = col_map.get(dimension.lower(), "document_id")
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT COALESCE({col}, 'unknown') AS dimension_value,
+                       COUNT(*) AS requests,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
+                       COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+                FROM model_usage
+                GROUP BY {col}
+                ORDER BY cost_usd DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def recent(self, limit: int = 10) -> list[Dict[str, Any]]:
         with get_db_connection() as conn:
