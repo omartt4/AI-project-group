@@ -498,3 +498,42 @@ Hit Rate@K, Precision@K, Recall@K, MRR, Entity Recall, Relation Recall, and
 False Retrieval Rate. It never calls the chat or evaluation model. Vector and
 hybrid modes still make one embedding request per evaluated question; graph-only
 mode makes no model request.
+
+---
+
+## ⚙️ Infrastructure, Observability & Reliability
+
+The platform includes comprehensive infrastructure observability and enterprise reliability features:
+
+### 1. LangSmith & LCEL Tracing
+To trace all LangChain runs, LLM calls, vector searches, and graph retrieval steps in LangSmith, add the following to `.env`:
+```ini
+LANGCHAIN_TRACING_V2=true
+LANGSMITH_API_KEY=your-langsmith-api-key
+LANGCHAIN_PROJECT=graph-rag
+```
+
+### 2. Free Chat Models as Default
+By default, the system routes chat, extraction, and evaluation tasks to high-capacity free cloud models (e.g. `google/gemma-4-31b-it:free`) to avoid recurring API expenses during testing and development.
+
+### 3. Cost Tracker, Cached Tokens & Hard Budget Limits
+- **Cached-Token Accounting**: The tracker records prompt, completion, total, and cached tokens reported by OpenRouter and provider APIs.
+- **Budget Protection**: Configurable in `.env`:
+  - `HARD_COST_LIMIT_USD=10.0`: Throws a `CostLimitExceededError` before invoking model calls if accumulated spend exceeds this limit.
+  - `COST_WARNING_THRESHOLD_USD=5.0`: Emits warning logs and highlights warnings in the UI when approaching the budget.
+- **Cost Summaries**: Inspect costs broken down by **document**, **query**, and **language** in the Evaluation Dashboard.
+
+### 4. Cross-Store Recovery & Consistency Audits
+Run consistency checks between ChromaDB chunks and Neo4j Document nodes anytime via:
+```python
+from graph_rag.ingestion.pipeline import pipeline
+report = pipeline.check_cross_store_consistency()
+```
+Or interactively from the **Evaluation & Telemetry** page in Streamlit.
+
+### 5. Resilient Retries & Backoff
+All cloud calls through OpenRouter feature bounded exponential backoff (initial interval 500ms, max 10s, max elapsed time matching model timeout) with full `Retry-After` header awareness.
+
+### 6. Production Security Checks
+In production environments (`ENVIRONMENT=production`), the application strictly rejects insecure development credentials (such as default passwords, placeholder JWT keys, or missing API keys).
+
