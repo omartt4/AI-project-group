@@ -1523,6 +1523,39 @@ class IngestionPipeline:
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         temp_path.replace(path)
 
+    def check_cross_store_consistency(self) -> Dict[str, Any]:
+        """Verify consistency between ChromaDB vector chunks and Neo4j graph document nodes."""
+        chroma_docs = vector_store.get_indexed_documents()
+        neo4j_docs = graph_builder.get_indexed_documents()
+
+        with get_db_connection() as conn:
+            journal_rows = conn.execute(
+                """
+                SELECT document_name, file_hash, status, stage, updated_at
+                FROM ingestion_runs
+                WHERE status != 'completed'
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+            incomplete_runs = [dict(r) for r in journal_rows]
+
+        in_chroma_only = sorted(list(chroma_docs - neo4j_docs)) if neo4j_docs else []
+        in_neo4j_only = sorted(list(neo4j_docs - chroma_docs)) if neo4j_docs else []
+        is_consistent = (len(in_chroma_only) == 0 and len(in_neo4j_only) == 0 and len(incomplete_runs) == 0)
+
+        report = {
+            "consistent": is_consistent,
+            "chroma_document_count": len(chroma_docs),
+            "neo4j_document_count": len(neo4j_docs),
+            "incomplete_runs_count": len(incomplete_runs),
+            "incomplete_runs": incomplete_runs,
+            "orphaned_in_chroma": in_chroma_only,
+            "orphaned_in_neo4j": in_neo4j_only,
+        }
+        if not is_consistent:
+            logger.warning("Cross-store consistency discrepancy: %s", report)
+        return report
+
     # ── Mode B Helper: Archive Upload Handler ──
     def ingest_uploaded_archive(
         self,
