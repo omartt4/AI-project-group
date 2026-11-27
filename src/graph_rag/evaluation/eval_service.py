@@ -46,6 +46,7 @@ class EvaluationService:
         session_id: Optional[int] = None,
         user_id: Optional[int] = None,
         latency: Optional[LatencyMetrics] = None,
+        detected_language: str = "en",
     ) -> EvaluationRecord:
         """Run full evaluation suite on an answered turn and persist to database."""
         lat = latency or LatencyMetrics()
@@ -76,8 +77,8 @@ class EvaluationService:
                     INSERT INTO evaluation_logs
                     (message_id, session_id, user_id, question, answer, context_chunks,
                      faithfulness, answer_relevance, context_relevance,
-                     retrieval_ms, generation_ms, eval_ms, total_ms, eval_reasoning)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     retrieval_ms, generation_ms, eval_ms, total_ms, eval_reasoning, detected_language)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_id,
@@ -98,6 +99,7 @@ class EvaluationService:
                             "answer_relevance": relevance_reason,
                             "context_relevance": ctx_reason,
                         }),
+                        detected_language,
                     ),
                 )
         except Exception as e:

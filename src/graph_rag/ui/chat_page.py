@@ -68,7 +68,7 @@ def render_chat_page() -> None:
             # If evaluation log exists for this message, show badges
             ev = eval_logs.get(msg.id)
             if ev:
-                c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 3])
+                c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.2, 1.2, 3])
                 with c1:
                     faith = ev.get("faithfulness", 0.0)
                     st.markdown(f"<span class='badge-faith'>✅ Grounding: {int(faith * 100)}%</span>", unsafe_allow_html=True)
@@ -78,6 +78,11 @@ def render_chat_page() -> None:
                 with c3:
                     total_ms = ev.get("total_ms", 0)
                     st.markdown(f"<span class='badge-latency'>⏱️ {total_ms}ms</span>", unsafe_allow_html=True)
+                with c4:
+                    # Show language if available in metadata
+                    lang = ev.get("detected_language", "en")
+                    lang_label = {"ar": "🇸🇦 AR", "en": "🇬🇧 EN", "mixed": "🌐 Mixed"}.get(lang, "🌐 EN")
+                    st.markdown(f"<span class='badge-info'>{lang_label}</span>", unsafe_allow_html=True)
 
     # Chat Input Box
     user_input = st.chat_input("Ask a question about the research papers...")
@@ -117,7 +122,7 @@ def render_chat_page() -> None:
                             st.markdown(f"- {s}")
 
                 # Inline adaptive telemetry and evaluation scores
-                badges_cols = st.columns([1.5, 1.2, 1.2, 1.2, 1.2])
+                badges_cols = st.columns([1.5, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
                 col_idx = 0
                 if resp.classification:
                     with badges_cols[col_idx]:
@@ -126,7 +131,29 @@ def render_chat_page() -> None:
                             unsafe_allow_html=True,
                         )
                     col_idx += 1
-                if resp.discovered_concepts_count:
+                # Show detected language
+                lang_label = {"ar": "🇸🇦 AR", "en": "🇬🇧 EN", "mixed": "🌐 Mixed"}.get(resp.detected_language, "🌐 EN")
+                with badges_cols[col_idx]:
+                    st.markdown(
+                        f"<span class='badge-info'>{lang_label}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    col_idx += 1
+                if resp.insufficient_evidence:
+                    with badges_cols[col_idx]:
+                        st.markdown(
+                            f"<span class='badge-warning'>⚠️ Low Evidence ({int(resp.evidence_quality_score * 100)}%)</span>",
+                            unsafe_allow_html=True,
+                        )
+                    col_idx += 1
+                if resp.discovered_concepts_count == 0:
+                    with badges_cols[col_idx]:
+                        st.markdown(
+                            f"<span class='badge-info'>🕸️ No Graph Results</span>",
+                            unsafe_allow_html=True,
+                        )
+                    col_idx += 1
+                elif resp.discovered_concepts_count:
                     with badges_cols[col_idx]:
                         st.markdown(
                             f"<span class='badge-concept'>🧠 {resp.discovered_concepts_count} Concepts</span>",
@@ -140,7 +167,7 @@ def render_chat_page() -> None:
                     with badges_cols[col_idx]:
                         st.markdown(f"<span class='badge-relevance'>🎯 Relevance: {int(resp.evaluation.answer_relevance * 100)}%</span>", unsafe_allow_html=True)
                     col_idx += 1
-                with badges_cols[min(col_idx, 4)]:
+                with badges_cols[min(col_idx, 6)]:
                     st.markdown(f"<span class='badge-latency'>⏱️ {resp.latency.total_ms}ms</span>", unsafe_allow_html=True)
 
                 # 3. Save assistant response into database

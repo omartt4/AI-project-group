@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS evaluation_logs (
     eval_ms             INTEGER, -- Evaluation latency in ms
     total_ms            INTEGER, -- Total turnaround latency in ms
     eval_reasoning      TEXT,    -- JSON string with judge commentary
+    detected_language   TEXT DEFAULT 'en', -- Detected query language (ar, en, mixed)
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
