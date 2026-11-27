@@ -611,6 +611,53 @@ def test_failed_segment_is_split_without_repeating_successful_segments() -> None
     )
 
 
+def test_retry_circuit_opens_when_most_of_a_batch_fails() -> None:
+    from graph_rag.graph.entity_extractor import GraphExtractionError
+
+    class AlwaysFailingChain:
+        calls = 0
+
+        def batch(self, segments, config, return_exceptions):
+            self.calls += 1
+            return [
+                GraphExtractionError(f"invalid JSON for segment {index}")
+                for index, _ in enumerate(segments)
+            ]
+
+    segments = [
+        StructuredDocumentInput(
+            document_id="circuit-doc",
+            title="Circuit document",
+            document_type="report",
+            language="en",
+            blocks=[
+                SourceBlock(
+                    f"segment:{index}",
+                    "paragraph",
+                    "A long failing sentence. " * 500,
+                )
+            ],
+        )
+        for index in range(3)
+    ]
+    chain = AlwaysFailingChain()
+    pipeline = object.__new__(IngestionPipeline)
+
+    successes, terminal_errors, attempted_errors = (
+        pipeline._extract_segments_with_retry(
+            chain,
+            segments,
+            document_id="circuit-doc",
+            document_name="circuit.pdf",
+        )
+    )
+
+    assert not successes
+    assert len(terminal_errors) == 3
+    assert len(attempted_errors) == 3
+    assert chain.calls == 1, "Circuit breaker must prevent recursive paid retries"
+
+
 def test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable() -> None:
     pipeline = object.__new__(IngestionPipeline)
     original_cache_dir = settings.EXTRACTION_CACHE_DIR
@@ -1450,6 +1497,7 @@ if __name__ == "__main__":
     test_extraction_cache_signature_tracks_language_and_context_settings()
     test_failed_model_response_is_cached_and_not_retried_implicitly()
     test_failed_segment_is_split_without_repeating_successful_segments()
+    test_retry_circuit_opens_when_most_of_a_batch_fails()
     test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable()
     test_entity_resolver_uses_exact_candidates_and_rejects_ambiguity()
     test_type_normalization_keeps_unseen_types_open()

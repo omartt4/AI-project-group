@@ -5,7 +5,7 @@ from typing import Union
 
 from graph_rag.config import settings
 from graph_rag.ingestion.language import detect_language
-from graph_rag.ingestion.ocr import OCRProvider, TesseractOCRProvider
+from graph_rag.ingestion.ocr import OCRProvider, create_ocr_provider
 from graph_rag.ingestion.pdf_parser import PageContent, ParsedDocument
 
 
@@ -17,7 +17,7 @@ class ImageParser:
         ocr_provider: OCRProvider | None = None,
         ocr_languages: str | None = None,
     ) -> None:
-        self.ocr_provider = ocr_provider or TesseractOCRProvider()
+        self.ocr_provider = ocr_provider or create_ocr_provider()
         self.ocr_languages = ocr_languages or settings.OCR_LANGUAGES
 
     def parse(

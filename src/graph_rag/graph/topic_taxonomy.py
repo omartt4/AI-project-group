@@ -120,6 +120,25 @@ class TopicTaxonomy:
             return name, False, True
         return candidates[0][1], True, False
 
+    @staticmethod
+    def _creates_cycle(
+        child: str,
+        parent: str,
+        parent_graph: Dict[str, set[str]],
+    ) -> bool:
+        """Return whether child -> parent participates in a proposed cycle."""
+        pending = [parent]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == child:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(parent_graph.get(current, set()))
+        return False
+
     def assign(
         self,
         raw_topics: str = "",
@@ -220,6 +239,20 @@ class TopicTaxonomy:
                     confidence,
                 )
 
+        parent_graph: Dict[str, set[str]] = {}
+        for canonical, proposal, _ in topic_names.values():
+            child = normalize_topic(canonical)
+            raw_parents = proposal.get("parent_names") or []
+            if isinstance(raw_parents, str):
+                raw_parents = [raw_parents]
+            parent_graph.setdefault(child, set()).update(
+                normalize_topic(parent)
+                for parent in raw_parents
+                if isinstance(parent, str)
+                and normalize_topic(parent) in topic_names
+                and normalize_topic(parent) != child
+            )
+
         assignments: Dict[tuple[str, str], TopicAssignment] = {}
         for canonical, proposal, confidence in topic_names.values():
             evidence = " ".join(str(proposal.get("evidence") or "").split())
@@ -239,14 +272,34 @@ class TopicTaxonomy:
                     and normalized_parent != normalize_topic(canonical)
                     and normalized_parent in topic_names
                 ):
+                    if self._creates_cycle(
+                        normalize_topic(canonical),
+                        normalized_parent,
+                        parent_graph,
+                    ):
+                        if diagnostics is not None:
+                            diagnostics.append(
+                                {
+                                    "diagnostic_type": "cyclic_topic_parent",
+                                    "name": canonical,
+                                    "parent_name": topic_names[normalized_parent][0],
+                                    "evidence": evidence,
+                                    "confidence": confidence,
+                                }
+                            )
+                        continue
                     parent_names.append(topic_names[normalized_parent][0])
             parent_names = list(dict.fromkeys(parent_names))
             level = "subtopic" if parent_names else "top_level"
             raw_aliases = proposal.get("aliases") or []
             if not isinstance(raw_aliases, list):
                 raw_aliases = [raw_aliases]
-            if matched and normalize_topic(name) != normalize_topic(canonical):
-                raw_aliases.append(name)
+            proposal_name = " ".join(str(proposal.get("name") or "").split())
+            if (
+                proposal_name
+                and normalize_topic(proposal_name) != normalize_topic(canonical)
+            ):
+                raw_aliases.append(proposal_name)
             aliases = tuple(
                 dict.fromkeys(
                     " ".join(str(alias).split())

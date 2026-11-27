@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, List
@@ -29,6 +30,7 @@ class SpacyCandidateExtractor:
         self.multilingual_ner_model = multilingual_ner_model
         self._spacy_module: Any = None
         self._spacy_import_error: Exception | None = None
+        self._arabic_stanza_pipeline: Any = None
         self._warned_capabilities: set[str] = set()
 
     def is_available(self) -> bool:
@@ -98,6 +100,125 @@ class SpacyCandidateExtractor:
             capability,
             model_name,
         )
+
+    def _load_arabic_stanza_pipeline(self) -> Any:
+        """Load the local Arabic UD parser without downloading at runtime."""
+        if self._arabic_stanza_pipeline is not None:
+            return self._arabic_stanza_pipeline
+        try:
+            import stanza
+        except ImportError as exc:
+            raise RuntimeError("Stanza is required for Arabic dependency parsing.") from exc
+        options: Dict[str, Any] = {
+            "lang": "ar",
+            "processors": "tokenize,mwt,pos,lemma,depparse",
+            "use_gpu": False,
+            "download_method": None,
+            "verbose": False,
+        }
+        resources_dir = os.getenv("STANZA_RESOURCES_DIR", "").strip()
+        if resources_dir:
+            options["dir"] = resources_dir
+        try:
+            self._arabic_stanza_pipeline = stanza.Pipeline(**options)
+        except Exception as exc:
+            raise RuntimeError(
+                "Arabic Stanza models are unavailable. Build the Docker image "
+                "or download the Arabic tokenize,mwt,pos,lemma,depparse models."
+            ) from exc
+        return self._arabic_stanza_pipeline
+
+    @staticmethod
+    def _stanza_noun_phrases(sentence: Any) -> List[str]:
+        """Derive compact Arabic noun-phrase hints from the dependency tree."""
+        words = list(getattr(sentence, "words", []) or [])
+        by_id = {
+            int(word.id): word
+            for word in words
+            if isinstance(getattr(word, "id", None), int)
+        }
+        phrase_dependencies = {
+            "amod",
+            "appos",
+            "case",
+            "compound",
+            "det",
+            "fixed",
+            "flat",
+            "nmod",
+            "nummod",
+        }
+        phrases: List[str] = []
+        for root in words:
+            if str(getattr(root, "upos", "")) not in {"NOUN", "PROPN"}:
+                continue
+            root_id = getattr(root, "id", None)
+            if not isinstance(root_id, int):
+                continue
+            selected = {root_id}
+            changed = True
+            while changed:
+                changed = False
+                for word in words:
+                    word_id = getattr(word, "id", None)
+                    head = getattr(word, "head", None)
+                    relation = str(getattr(word, "deprel", "")).split(":", 1)[0]
+                    if (
+                        isinstance(word_id, int)
+                        and isinstance(head, int)
+                        and head in selected
+                        and relation in phrase_dependencies
+                        and word_id not in selected
+                    ):
+                        selected.add(word_id)
+                        changed = True
+            phrase = " ".join(
+                str(getattr(by_id[index], "text", "")).strip()
+                for index in sorted(selected)
+                if index in by_id
+            ).strip()
+            if phrase:
+                phrases.append(phrase)
+        return list(dict.fromkeys(phrases))
+
+    def _arabic_dependency_rows(self, text: str) -> Dict[str, Any]:
+        parsed = self._load_arabic_stanza_pipeline()(text)
+        sentences: List[str] = []
+        tokens: List[str] = []
+        dependencies: List[Dict[str, str]] = []
+        noun_phrases: List[str] = []
+        for sentence in getattr(parsed, "sentences", []) or []:
+            words = list(getattr(sentence, "words", []) or [])
+            by_id = {
+                int(word.id): str(getattr(word, "text", ""))
+                for word in words
+                if isinstance(getattr(word, "id", None), int)
+            }
+            sentence_text = str(getattr(sentence, "text", "")).strip()
+            if not sentence_text:
+                sentence_text = " ".join(by_id[index] for index in sorted(by_id))
+            if sentence_text:
+                sentences.append(sentence_text)
+            for word in words:
+                token = str(getattr(word, "text", "")).strip()
+                if not token:
+                    continue
+                tokens.append(token)
+                head_id = getattr(word, "head", 0)
+                dependencies.append(
+                    {
+                        "token": token,
+                        "dependency": str(getattr(word, "deprel", "")),
+                        "head": "ROOT" if head_id == 0 else by_id.get(head_id, ""),
+                    }
+                )
+            noun_phrases.extend(self._stanza_noun_phrases(sentence))
+        return {
+            "sentences": sentences,
+            "tokens": tokens,
+            "dependencies": dependencies,
+            "noun_phrases": list(dict.fromkeys(noun_phrases)),
+        }
 
     def _candidate_rows(
         self,
@@ -181,6 +302,15 @@ class SpacyCandidateExtractor:
             has_dependency_parser=has_dependency_parser,
             model_name=tokenizer_model.meta.get("name", "unknown"),
         )
+        parser_model_name = tokenizer_model.meta.get("name", "")
+        language_code = (language or "und").split("-", 1)[0].casefold()
+        if language_code == "ar":
+            try:
+                candidates.update(self._arabic_dependency_rows(text))
+                parser_model_name = "stanza_ar_ud"
+            except RuntimeError as exc:
+                self._warn_fallback("Arabic dependency parsing", str(exc))
+
         ner_pipe_names = set(ner_model.pipe_names) if ner_model is not None else set()
         if "ner" not in ner_pipe_names:
             self._warn_fallback(
@@ -202,7 +332,7 @@ class SpacyCandidateExtractor:
                 for entity in ner_doc.ents
             ]
             candidates["ner_model"] = ner_model.meta.get("name", "")
-        candidates["parser_model"] = tokenizer_model.meta.get("name", "")
+        candidates["parser_model"] = parser_model_name
         logger.debug(
             "Generated spaCy candidate hints: language=%s sentences=%d entities=%d",
             language,

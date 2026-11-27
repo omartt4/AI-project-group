@@ -10,6 +10,7 @@ from neo4j import Driver, GraphDatabase
 
 from graph_rag.config import settings
 from graph_rag.graph.entity_extractor import GraphExtractionResult
+from graph_rag.graph.entity_resolution import normalize_entity_name
 from graph_rag.graph.topic_taxonomy import (
     TopicAssignment,
     normalize_topic,
@@ -587,12 +588,16 @@ class GraphBuilder:
                         ON CREATE SET e.created_at = datetime()
                         SET e.entity_id = $entity_id,
                             e.name = $name,
+                            e.normalized_name = $normalized_name,
                             e.category = $category,
                             e.description = $description,
                             e.aliases = $aliases,
+                            e.normalized_aliases = $normalized_aliases,
                             e.attributes_json = $attributes_json,
                             e.role = $role,
+                            e.normalized_role = $normalized_role,
                             e.organization = $organization,
+                            e.normalized_organization = $normalized_organization,
                             e.evidence = $evidence,
                             e.confidence = $confidence,
                             e.provenance_json = $provenance_json,
@@ -602,12 +607,24 @@ class GraphBuilder:
                         uid=entity_uid,
                         entity_id=entity.entity_id,
                         name=entity.name,
+                        normalized_name=normalize_entity_name(entity.name),
                         category=entity.category,
                         description=entity.description,
                         aliases=entity.aliases,
+                        normalized_aliases=[
+                            normalize_entity_name(alias)
+                            for alias in entity.aliases
+                            if normalize_entity_name(alias)
+                        ],
                         attributes_json=json.dumps(entity.attributes, ensure_ascii=False),
                         role=entity.attributes.get("role", ""),
+                        normalized_role=normalize_entity_name(
+                            entity.attributes.get("role", "")
+                        ),
                         organization=entity.attributes.get("organization", ""),
+                        normalized_organization=normalize_entity_name(
+                            entity.attributes.get("organization", "")
+                        ),
                         evidence=getattr(entity, "evidence", ""),
                         confidence=getattr(entity, "confidence", 0.0),
                         provenance_json=json.dumps(
@@ -830,16 +847,36 @@ class GraphBuilder:
         category: str,
         aliases: List[str],
         attributes: Dict[str, str],
+        relationship_context: Optional[List[Dict[str, str]]] = None,
     ) -> List[Dict[str, Any]]:
         """Find exact name/alias or role-context matches without guessing."""
-        names = list(dict.fromkeys(
+        raw_names = list(dict.fromkeys(
             value.strip().casefold()
             for value in [name, *aliases]
             if value and value.strip()
         ))
-        role = str(attributes.get("role") or "").strip().casefold()
-        organization = str(attributes.get("organization") or "").strip().casefold()
-        if not names and not (role and organization):
+        names = list(dict.fromkeys(
+            normalize_entity_name(value)
+            for value in [name, *aliases]
+            if normalize_entity_name(value)
+        ))
+        role = normalize_entity_name(str(attributes.get("role") or ""))
+        organization = normalize_entity_name(
+            str(attributes.get("organization") or "")
+        )
+        contexts = [
+            {
+                "relation_type": str(
+                    item.get("relation_type") or ""
+                ).strip().casefold(),
+                "other_name": normalize_entity_name(
+                    str(item.get("other_name") or "")
+                ),
+            }
+            for item in (relationship_context or [])
+            if item.get("relation_type") and item.get("other_name")
+        ]
+        if not names and not (role and organization) and not contexts:
             return []
         driver = self.get_driver()
         if not driver:
@@ -850,14 +887,19 @@ class GraphBuilder:
                     """
                     MATCH (e:Entity {dataset_id: $dataset_id})
                     WHERE (
-                        toLower(e.name) IN $names
+                        e.normalized_name IN $names
+                        OR toLower(e.name) IN $raw_names
+                        OR any(alias IN coalesce(e.normalized_aliases, [])
+                               WHERE alias IN $names)
                         OR any(alias IN coalesce(e.aliases, [])
-                               WHERE toLower(alias) IN $names)
+                               WHERE toLower(alias) IN $raw_names)
                     )
                     OR (
                         $role <> '' AND $organization <> ''
-                        AND toLower(trim(coalesce(e.role, ''))) = $role
-                        AND toLower(trim(coalesce(e.organization, ''))) = $organization
+                        AND coalesce(e.normalized_role,
+                                     toLower(trim(coalesce(e.role, '')))) = $role
+                        AND coalesce(e.normalized_organization,
+                                     toLower(trim(coalesce(e.organization, '')))) = $organization
                     )
                     RETURN e.entity_id AS entity_id, e.name AS name,
                            e.category AS category, e.description AS description,
@@ -866,10 +908,35 @@ class GraphBuilder:
                     """,
                     dataset_id=self.dataset_id,
                     names=names,
+                    raw_names=raw_names,
                     role=role,
                     organization=organization,
                 )
-                return [self._entity_row(row) for row in rows]
+                candidates = [self._entity_row(row) for row in rows]
+                if not candidates and contexts:
+                    related_rows = session.run(
+                        """
+                        UNWIND $contexts AS context
+                        MATCH (e:Entity {dataset_id: $dataset_id})
+                              -[r:RELATION]-(other:Entity {dataset_id: $dataset_id})
+                        WHERE toLower(coalesce(r.relation_type, '')) = context.relation_type
+                          AND (
+                            other.normalized_name = context.other_name
+                            OR any(alias IN coalesce(other.normalized_aliases, [])
+                                   WHERE alias = context.other_name)
+                          )
+                          AND toLower(e.category) = $category
+                        RETURN DISTINCT e.entity_id AS entity_id, e.name AS name,
+                               e.category AS category, e.description AS description,
+                               e.aliases AS aliases, e.attributes_json AS attributes_json
+                        LIMIT 50
+                        """,
+                        dataset_id=self.dataset_id,
+                        contexts=contexts,
+                        category=category.casefold(),
+                    )
+                    candidates = [self._entity_row(row) for row in related_rows]
+                return candidates
         except Exception as exc:
             logger.exception(
                 "Could not resolve graph entity candidate %r: %s",

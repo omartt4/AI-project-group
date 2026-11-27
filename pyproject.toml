@@ -32,6 +32,8 @@ dependencies = [
     "pillow>=13.0.0",
     "pytesseract>=0.3.13",
     "spacy>=3.8.0,<4.0.0",
+    "stanza>=1.15.0,<2.0.0",
+    "torch==2.9.1+cpu",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "xx-ent-wiki-sm @ https://github.com/explosion/spacy-models/releases/download/xx_ent_wiki_sm-3.8.0/xx_ent_wiki_sm-3.8.0-py3-none-any.whl",
     "xx-sent-ud-sm @ https://github.com/explosion/spacy-models/releases/download/xx_sent_ud_sm-3.8.0/xx_sent_ud_sm-3.8.0-py3-none-any.whl",
@@ -43,3 +45,11 @@ graph-rag = "graph_rag:main"
 [build-system]
 requires = ["uv_build>=0.13.3,<0.14.0"]
 build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

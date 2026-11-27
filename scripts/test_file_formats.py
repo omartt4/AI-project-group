@@ -144,7 +144,10 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertEqual(candidates["tokens"], ["First", "sentence", ".", "Second", "sentence", "."])
         self.assertEqual(candidates["dependencies"], [])
         self.assertEqual(candidates["entities"], [])
-        self.assertEqual(len(logs.records), 2)
+        self.assertEqual(len(logs.records), 3)
+        self.assertTrue(
+            any("Arabic dependency parsing" in record.getMessage() for record in logs.records)
+        )
 
     def test_spacy_ner_only_pipeline_keeps_ner_and_uses_other_fallbacks(self) -> None:
         from types import SimpleNamespace
@@ -181,7 +184,10 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertEqual(candidates["tokens"], ["Khaled", "met", "Microsoft", "."])
         self.assertEqual(candidates["dependencies"], [])
         self.assertEqual(candidates["entities"][0]["text"], "Microsoft")
-        self.assertEqual(len(logs.records), 2)
+        self.assertEqual(len(logs.records), 3)
+        self.assertTrue(
+            any("Arabic dependency parsing" in record.getMessage() for record in logs.records)
+        )
 
     def test_spacy_full_pipeline_uses_all_available_capabilities(self) -> None:
         from types import SimpleNamespace
@@ -972,7 +978,7 @@ class StructuredFileParserTests(unittest.TestCase):
         )
         self.assertEqual(
             callback.response_records[0]["pricing_version"],
-            "2026-11-23",
+            "2026-11-26",
         )
         self.assertEqual(
             callback.response_records[0]["response_id"],
@@ -1061,11 +1067,24 @@ class StructuredFileParserTests(unittest.TestCase):
         base_tier = calculate_cost_usd("qwen/qwen3.7-flash", 1000, 1000)
         high_tier = calculate_cost_usd("qwen/qwen3.7-flash", 32000, 1000)
         free_tier = calculate_cost_usd("google/gemma-4-31b-it:free", None, None)
+        configured_free_models = (
+            "google/gemma-4-26b-a4b-it:free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "nvidia/nemotron-3.5-super-vl:free",
+            "nvidia/nemotron-3.5-embed-8b:free",
+        )
+        configured_free_costs = [
+            calculate_cost_usd(model, None, None)
+            for model in configured_free_models
+        ]
         unknown_model = calculate_cost_usd("mock-model", 100, 100)
         self.assertAlmostEqual(float(base_tier.cost_usd), 0.00016)
         self.assertAlmostEqual(float(high_tier.cost_usd), 0.0036)
         self.assertIn("prompt_tokens>=32000", high_tier.method)
         self.assertEqual(free_tier.cost_usd, 0)
+        self.assertTrue(
+            all(result.cost_usd == 0 for result in configured_free_costs)
+        )
         self.assertIsNone(unknown_model.cost_usd)
 
         init_db()
@@ -1104,7 +1123,7 @@ class StructuredFileParserTests(unittest.TestCase):
         self.assertAlmostEqual(recent["provider_cost_usd"], 0.0009)
         self.assertEqual(
             recent["cost_method"],
-            "local_rate_card:2026-11-23",
+            "local_rate_card:2026-11-26",
         )
         self.assertEqual(recent["input_rate_usd_per_million"], 0.01)
         self.assertEqual(recent["cache_status"], "miss")
@@ -1219,7 +1238,7 @@ class StructuredFileParserTests(unittest.TestCase):
                 ).fetchone()
             self.assertAlmostEqual(row["cost_usd"], 0.0001)
             self.assertAlmostEqual(row["provider_cost_usd"], 0.0009)
-            self.assertEqual(row["cost_method"], "local_rate_card:2026-11-23")
+            self.assertEqual(row["cost_method"], "local_rate_card:2026-11-26")
         finally:
             object.__setattr__(settings, "SQLITE_DB_PATH", original_db_path)
 
@@ -1646,6 +1665,23 @@ class StructuredFileParserTests(unittest.TestCase):
 
         self.assertEqual(transformer_options["allowed_nodes"], [])
         self.assertEqual(transformer_options["allowed_relationships"], [])
+        self.assertEqual(
+            transformer_options["node_properties"],
+            [
+                "name",
+                "document_type",
+                "evidence",
+                "source_ref",
+                "confidence",
+                "aliases",
+                "attributes",
+                "description",
+            ],
+        )
+        self.assertEqual(
+            transformer_options["relationship_properties"],
+            ["evidence", "source_ref", "confidence", "description"],
+        )
         self.assertEqual(
             [entity.category for entity in result.entities],
             ["Environmental Phenomenon", "Agricultural Metric"],

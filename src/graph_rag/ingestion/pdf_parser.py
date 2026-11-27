@@ -14,7 +14,7 @@ import pymupdf as fitz  # PyMuPDF
 
 from graph_rag.config import settings
 from graph_rag.ingestion.language import detect_language
-from graph_rag.ingestion.ocr import OCRProvider, TesseractOCRProvider
+from graph_rag.ingestion.ocr import OCRProvider, create_ocr_provider
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ class PDFParser:
     ) -> None:
         if ocr_dpi < 72:
             raise ValueError("OCR_DPI must be at least 72")
-        self.ocr_provider = ocr_provider or TesseractOCRProvider()
+        self.ocr_provider = ocr_provider or create_ocr_provider()
         self.ocr_dpi = ocr_dpi
         self.ocr_languages = ocr_languages or settings.OCR_LANGUAGES
 

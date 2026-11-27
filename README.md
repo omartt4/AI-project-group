@@ -15,7 +15,7 @@
   - **Adaptive LLM Synthesis**: Tailors cloud-model prompt templates to the query intent (e.g. comparative matrices, relationship chains, thematic summaries).
 - **Task-Specific Cloud Models**: Extraction, answer generation, evaluation, and embeddings each use an explicit OpenRouter model selected in `.env`; credentials are never committed.
 - **Evidence-First Graph**: Documents, topics, subtopics, and canonical entities are stored in Neo4j; text chunks and entity vectors remain in ChromaDB. Evidence, mention provenance, and non-blocking diagnostics are stored in SQLite. Neo4j does not create Chunk or Mention nodes, and relationship types remain open-ended properties on generic `RELATION` edges.
-- **Automatic Open-Schema Ingestion**: LangChain coordinates document-level graph extraction. spaCy supplies sentence, token, NER, dependency, and noun-phrase candidates only; evidence- and confidence-validated LLM results determine graph facts. Entity/type normalization, duplicate resolution, topic hierarchy, and ambiguous-case diagnostics require no routine manual review.
+- **Automatic Open-Schema Ingestion**: LangChain coordinates document-level graph extraction. spaCy supplies English and multilingual NER candidates; Stanza supplies Arabic Universal Dependencies and dependency-derived noun phrases. Evidence- and confidence-validated LLM results determine graph facts. Entity/type normalization, duplicate resolution, topic hierarchy, and ambiguous-case diagnostics require no routine manual review.
 - **Dual Data Sources**:
   1. **Initial Repository**: The current research corpus placed in the `pdfs/` folder.
   2. **Dynamic UI Uploads**: Users can upload new papers directly in the Streamlit UI.
@@ -211,11 +211,13 @@ flowchart TD
 
 ## 📊 How It Works (In Simple Words)
 
-Scanned PDFs and image inputs use local Tesseract OCR. Install Tesseract with
-both the English (`eng`) and Arabic (`ara`) language data, and ensure the
-executable is available on `PATH`. OCR language and PDF render DPI are
-configurable with `OCR_LANGUAGES` and `OCR_DPI`; no OCR service credentials are
-required.
+Scanned PDFs and image inputs use a replaceable OCR layer. The default is
+**PaddleOCR** because it preserves text-line bounding boxes and performs better
+than the previous Tesseract-only path on Arabic and mixed-language pages.
+Docker runs PaddleOCR in an isolated local sidecar, so it consumes no API
+credits and does not reintroduce the Windows spaCy DLL restriction. Tesseract
+(`eng+ara`) remains the automatic fallback. Surya is available as an optional
+benchmark backend through `SURYA_OCR_COMMAND`.
 
 1. **Initial Startup (Mode A)**:
    The system scans the current `pdfs/` corpus and checks `pdfs/metadata.csv`. New papers are parsed, split into overlapping chunks, embedded with the configured cloud embedding model, and written to a versioned ChromaDB collection and the evidence-first Neo4j graph.
@@ -250,8 +252,47 @@ Choose separate OpenRouter models for structured extraction, final answers,
 evaluation, and embeddings. Put their exact model IDs in the local `.env` file;
 model selection is configuration and does not require source-code changes.
 
-### 3. Run Neo4j (Optional / Recommended)
-If you have Docker installed, start Neo4j with one command:
+### 3. Recommended: Run the Complete Stack with Docker
+
+Docker is the recommended Windows path because Linux containers can load spaCy
+normally and keep PaddleOCR's native dependencies isolated from the app.
+
+Copy the environment template, set `OPENROUTER_API_KEY`, choose a strong
+`NEO4J_PASSWORD`, then start the application, Neo4j, and PaddleOCR:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+Open:
+
+- Streamlit: `http://localhost:8501`
+- Neo4j Browser: `http://localhost:7474`
+- PaddleOCR health endpoint: `http://localhost:8001/health`
+
+Verify both spaCy and PaddleOCR without calling OpenRouter:
+
+```powershell
+docker compose run --rm app python scripts/check_nlp_runtime.py --require-spacy --require-arabic-dependencies --require-ocr paddle
+```
+
+Ingest documents from the mounted `pdfs/` directory:
+
+```powershell
+docker compose run --rm app python scripts/ingest.py --limit 1
+```
+
+Stop the containers while preserving Neo4j and application data:
+
+```powershell
+docker compose down
+```
+
+Use `docker compose down -v` only when you deliberately want to delete the
+Docker volumes and rebuild the databases from zero.
+
+For a Neo4j-only local setup instead, run:
 ```bash
 docker run -d --name neo4j-graph \
   -p 7474:7474 -p 7687:7687 \
@@ -275,17 +316,21 @@ Key configuration items in `.env`:
 ```env
 MODEL_API_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=replace-with-your-key
-OPENROUTER_EXTRACTION_MODEL=anthropic/claude-haiku-5.5
-OPENROUTER_CHAT_MODEL=google/gemini-3.8-flash
-OPENROUTER_EVAL_MODEL=anthropic/claude-haiku-5.5
-OPENROUTER_EMBED_MODEL=qwen/qwen3-embedding-8b
+OPENROUTER_EXTRACTION_MODEL=google/gemma-4-26b-a4b-it:free
+OPENROUTER_CHAT_MODEL=nvidia/nemotron-3.5-lightning:free
+OPENROUTER_EVAL_MODEL=nvidia/nemotron-3.5-super-vl:free
+OPENROUTER_EMBED_MODEL=nvidia/nemotron-3.5-embed-8b:free
 EMBEDDING_DIMENSIONS=4096
-CHROMA_COLLECTION_NAME=research_papers_graph_v2
+CHROMA_COLLECTION_NAME=documents_nemotron_v1
 DATASET_ID=research-v2
 
 NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
 NEO4J_USER=
 NEO4J_PASSWORD=
+
+OCR_ENGINE=paddle
+OCR_FALLBACK_ENGINE=tesseract
+PADDLE_OCR_URL=http://localhost:8001
 
 PDF_DIR=pdfs
 METADATA_FILE=pdfs/metadata.csv
@@ -328,11 +373,13 @@ the extraction model again. Rebuilds require a complete, compatible cache:
 ```bash
 uv run python scripts/ingest.py --limit 3 --rebuild-graph
 ```
-If the operating system blocks spaCy's native runtime, ingestion logs a warning
-and uses a deterministic lexical fallback for sentence boundaries and token
-budgeting; spaCy NER, dependency, and noun-phrase candidates are unavailable
-until that runtime is allowed to load. Missing configured spaCy models remain
-an explicit error.
+On the managed Windows environment, Application Control may block spaCy's
+native `.pyd` files. Native ingestion then logs an explicit warning and uses the
+lexical fallback. The Docker image validates spaCy NER plus a local Stanza
+Arabic pipeline (`tokenize,mwt,pos,lemma,depparse`) during construction. Arabic
+noun-phrase hints are derived from that dependency tree. The LLM remains the
+final open-schema extractor; NLP candidates never restrict the graph to a fixed
+label allowlist and neither spaCy nor Stanza consumes API credits.
 Only use `--refresh-extraction` when a deliberately fresh extraction is
 required. Cache entries are versioned by document content, model, prompt,
 extraction pipeline, and normalization versions. Model usage is recorded per API
@@ -345,11 +392,11 @@ cost = (input_tokens * input_USD_per_million
       + output_tokens * output_USD_per_million) / 1,000,000
 ```
 
-The versioned rate card is in `src/graph_rag/llm/pricing.py`. It currently
-records Gemma 4 31B Free at $0, Qwen3 Embedding 8B at $0.01 per million input
-tokens, and Qwen3.7 Flash at $0.03/$0.13 per million input/output tokens.
-Qwen3.7 Flash uses its published higher tiers at prompts of 32K and 256K
-tokens.
+The versioned rate card is in `src/graph_rag/llm/pricing.py`. The default
+Gemma extraction, Nemotron answer/evaluation, and Nemotron embedding model IDs
+are recorded at `$0` because the configured OpenRouter variants are free. The
+provider-reported cost is still stored separately so a provider-side pricing
+change remains visible.
 Token counts come from API usage metadata; the provider-reported cost, when
 present, is stored separately for comparison. If a model is not in the local
 rate card or token counts are unavailable for a paid model, the calculated cost
@@ -361,6 +408,25 @@ API](https://openrouter.ai/api/v1/embeddings/models).
 The CLI prints per-run calculated cost, and recent request details appear in
 the application sidebar. Live evaluation is disabled by default during
 development to avoid extra judge-model calls.
+
+### OCR Quality Benchmark
+
+The OCR benchmark is local and makes no OpenRouter calls. Copy
+`evaluation_datasets/ocr/manifest.example.jsonl` to `manifest.jsonl`, add
+human-verified Arabic, English, mixed-language, scanned, and table samples, then
+run:
+
+```powershell
+docker compose run --rm app python scripts/benchmark_ocr.py \
+  --manifest evaluation_datasets/ocr/manifest.jsonl \
+  --providers paddle tesseract \
+  --output-dir data/ocr_benchmark
+```
+
+The report includes character error rate (CER), word error rate (WER), latency,
+confidence, bounding-box coverage, page numbers, and expected/detected table
+counts. Surya can also be measured when its CLI is installed by adding `surya`
+to `--providers`.
 
 To migrate existing paper metadata to the hierarchical Top-level Topic →
 Subtopic model without re-embedding documents or calling an LLM:
@@ -514,7 +580,7 @@ LANGCHAIN_PROJECT=graph-rag
 ```
 
 ### 2. Free Chat Models as Default
-By default, the system routes chat, extraction, and evaluation tasks to high-capacity free cloud models (e.g. `google/gemma-4-31b-it:free`) to avoid recurring API expenses during testing and development.
+By default, the system uses task-specific free OpenRouter models: `google/gemma-4-26b-a4b-it:free` for structured graph extraction, `nvidia/nemotron-3.5-lightning:free` for chat, `nvidia/nemotron-3.5-super-vl:free` for evaluation, and `nvidia/nemotron-3.5-embed-8b:free` for embeddings. These models have a calculated token cost of `$0`, but provider rate limits and daily request quotas still apply.
 
 ### 3. Cost Tracker, Cached Tokens & Hard Budget Limits
 - **Cached-Token Accounting**: The tracker records prompt, completion, total, and cached tokens reported by OpenRouter and provider APIs.

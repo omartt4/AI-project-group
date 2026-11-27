@@ -32,16 +32,27 @@ class Settings:
     )
     MODEL_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     EXTRACTION_MODEL: str = os.getenv(
-        "OPENROUTER_EXTRACTION_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
+        "OPENROUTER_EXTRACTION_MODEL",
+        "google/gemma-4-26b-a4b-it:free"
+        if not _LEGACY_LLM_MODEL
+        else _LEGACY_LLM_MODEL,
     )
     CHAT_MODEL: str = os.getenv(
-        "OPENROUTER_CHAT_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
+        "OPENROUTER_CHAT_MODEL",
+        "nvidia/nemotron-3.5-lightning:free"
+        if not _LEGACY_LLM_MODEL
+        else _LEGACY_LLM_MODEL,
     )
     EVALUATION_MODEL: str = os.getenv(
-        "OPENROUTER_EVAL_MODEL", "nvidia/nemotron-3.5-lightning:free" if not _LEGACY_LLM_MODEL else _LEGACY_LLM_MODEL
+        "OPENROUTER_EVAL_MODEL",
+        "nvidia/nemotron-3.5-super-vl:free"
+        if not _LEGACY_LLM_MODEL
+        else _LEGACY_LLM_MODEL,
     )
-    EMBEDDING_MODEL: str = os.getenv("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-8b")
-    EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "0"))
+    EMBEDDING_MODEL: str = os.getenv(
+        "OPENROUTER_EMBED_MODEL", "nvidia/nemotron-3.5-embed-8b:free"
+    )
+    EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "4096"))
     MODEL_TIMEOUT_SECONDS: float = float(os.getenv("MODEL_TIMEOUT_SECONDS", "120.0"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "2"))
     LANGCHAIN_MAX_CONCURRENCY: int = int(
@@ -101,6 +112,9 @@ class Settings:
     EXTRACTION_SEGMENT_RETRY_DEPTH: int = int(
         os.getenv("EXTRACTION_SEGMENT_RETRY_DEPTH", "2")
     )
+    EXTRACTION_BATCH_MAX_FAILURE_RATIO: float = float(
+        os.getenv("EXTRACTION_BATCH_MAX_FAILURE_RATIO", "0.50")
+    )
     EXTRACTION_MIN_CONFIDENCE: float = float(
         os.getenv("EXTRACTION_MIN_CONFIDENCE", "0.65")
     )
@@ -109,6 +123,19 @@ class Settings:
     )
     OCR_DPI: int = int(os.getenv("OCR_DPI", "200"))
     OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "eng+ara")
+    OCR_ENGINE: str = os.getenv("OCR_ENGINE", "paddle").strip().lower()
+    OCR_FALLBACK_ENGINE: str = os.getenv(
+        "OCR_FALLBACK_ENGINE", "tesseract"
+    ).strip().lower()
+    PADDLE_OCR_LANGUAGE: str = os.getenv("PADDLE_OCR_LANGUAGE", "ar").strip()
+    PADDLE_OCR_URL: str = os.getenv("PADDLE_OCR_URL", "").strip().rstrip("/")
+    PADDLE_OCR_TIMEOUT_SECONDS: float = float(
+        os.getenv("PADDLE_OCR_TIMEOUT_SECONDS", "300")
+    )
+    SURYA_OCR_COMMAND: str = os.getenv("SURYA_OCR_COMMAND", "surya_ocr").strip()
+    SURYA_OCR_TIMEOUT_SECONDS: float = float(
+        os.getenv("SURYA_OCR_TIMEOUT_SECONDS", "300")
+    )
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
     GRAPH_SCHEMA_VERSION: str = os.getenv("GRAPH_SCHEMA_VERSION", "4")
     EXTRACTION_VERSION: str = os.getenv(

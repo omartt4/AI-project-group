@@ -235,8 +235,7 @@ classification or unknown. Do not treat this base node as an entity or topic.
 
 Every semantic entity node must have properties evidence (an exact short quote
 from one source region), source_ref (that region's exact reference), confidence
-(0-1), aliases (JSON array text), attributes (JSON object text), and mentions
-(JSON array text when specific mentions can be grounded). Every semantic
+(0-1), aliases (JSON array text), and attributes (JSON object text). Every semantic
 relationship must have exact evidence, source_ref, confidence, and a concise
 description. Use properties as key/value strings.
 
@@ -639,8 +638,22 @@ class EntityExtractor:
             allowed_relationships=[],
             prompt=GRAPH_TRANSFORMER_PROMPT,
             strict_mode=True,
-            node_properties=True,
-            relationship_properties=True,
+            node_properties=[
+                "name",
+                "document_type",
+                "evidence",
+                "source_ref",
+                "confidence",
+                "aliases",
+                "attributes",
+                "description",
+            ],
+            relationship_properties=[
+                "evidence",
+                "source_ref",
+                "confidence",
+                "description",
+            ],
         )
         usage_callback = ModelUsageCallbackHandler(
             role=getattr(self.client, "role", "extraction"),

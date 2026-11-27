@@ -8,7 +8,7 @@ import re
 import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from graph_rag.graph.entity_extractor import ExtractedEntity
+from graph_rag.graph.entity_extractor import ExtractedEntity, ExtractedRelation
 from graph_rag.graph.topic_taxonomy import topic_taxonomy
 
 
@@ -16,7 +16,31 @@ _TRAILING_ALIAS = re.compile(r"^(?P<name>.+?)\s*\((?P<alias>[A-Za-z][A-Za-z0-9-]
 
 
 def normalize_entity_name(value: str) -> str:
+    """Normalize Latin/Arabic name variants without changing stored display text."""
     text = unicodedata.normalize("NFKC", value or "").casefold().strip()
+    normalized: List[str] = []
+    for character in text:
+        codepoint = ord(character)
+        if (
+            character == "\u0640"
+            or 0x064B <= codepoint <= 0x065F
+            or codepoint == 0x0670
+            or 0x06D6 <= codepoint <= 0x06ED
+            or 0x08D3 <= codepoint <= 0x08FF
+        ):
+            continue
+        normalized.append(
+            {
+                "أ": "ا",
+                "إ": "ا",
+                "آ": "ا",
+                "ٱ": "ا",
+                "ى": "ي",
+                "ئ": "ي",
+                "ؤ": "و",
+            }.get(character, character)
+        )
+    text = "".join(normalized)
     return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip()
 
 
@@ -273,6 +297,7 @@ class EntityResolver:
     def resolve(
         self,
         entities: List[ExtractedEntity],
+        relations: Optional[List[ExtractedRelation]] = None,
     ) -> tuple[List[ExtractedEntity], List[Dict[str, Any]], set[str], Dict[str, str]]:
         resolved: List[ExtractedEntity] = []
         diagnostics: List[Dict[str, Any]] = []
@@ -280,14 +305,19 @@ class EntityResolver:
         id_map: Dict[str, str] = {}
         unresolved: List[ExtractedEntity] = []
         queries: List[str] = []
+        relationship_context = self._relationship_context(entities, relations or [])
         for entity in entities:
             original_id = entity.entity_id
-            exact = self.graph.find_entity_candidates(
-                name=entity.name,
-                category=entity.category,
-                aliases=entity.aliases,
-                attributes=entity.attributes,
-            )
+            contexts = relationship_context.get(entity.entity_id, [])
+            lookup_kwargs = {
+                "name": entity.name,
+                "category": entity.category,
+                "aliases": entity.aliases,
+                "attributes": entity.attributes,
+            }
+            if contexts:
+                lookup_kwargs["relationship_context"] = contexts
+            exact = self.graph.find_entity_candidates(**lookup_kwargs)
             exact_by_id = {
                 str(candidate.get("entity_id") or ""): candidate
                 for candidate in exact
@@ -322,6 +352,19 @@ class EntityResolver:
                         *[
                             f"{key} {value}"
                             for key, value in entity.attributes.items()
+                        ],
+                        *[
+                            " ".join(
+                                filter(
+                                    None,
+                                    [
+                                        context.get("relation_type", ""),
+                                        context.get("other_name", ""),
+                                        context.get("other_category", ""),
+                                    ],
+                                )
+                            )
+                            for context in contexts
                         ],
                     ]
                 ).strip()
@@ -367,6 +410,56 @@ class EntityResolver:
             id_map[original_id] = entity.entity_id
             resolved.append(entity)
         return resolved, diagnostics, ambiguous_ids, id_map
+
+    @staticmethod
+    def _relationship_context(
+        entities: List[ExtractedEntity],
+        relations: List[ExtractedRelation],
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """Describe each entity by its local semantic neighbours for resolution."""
+        by_id = {entity.entity_id: entity for entity in entities if entity.entity_id}
+        by_name = {
+            (normalize_entity_name(entity.name), entity.category.casefold()): entity
+            for entity in entities
+        }
+
+        def endpoint(
+            entity_id: str,
+            name: str,
+            category: str,
+        ) -> Optional[ExtractedEntity]:
+            return by_id.get(entity_id) or by_name.get(
+                (normalize_entity_name(name), category.casefold())
+            )
+
+        context: Dict[str, List[Dict[str, str]]] = {}
+        for relation in relations:
+            source = endpoint(
+                relation.source_entity_id,
+                relation.source,
+                relation.source_category,
+            )
+            target = endpoint(
+                relation.target_entity_id,
+                relation.target,
+                relation.target_category,
+            )
+            if source and target:
+                context.setdefault(source.entity_id, []).append(
+                    {
+                        "relation_type": relation.relation_type,
+                        "other_name": target.name,
+                        "other_category": target.category,
+                    }
+                )
+                context.setdefault(target.entity_id, []).append(
+                    {
+                        "relation_type": relation.relation_type,
+                        "other_name": source.name,
+                        "other_category": source.category,
+                    }
+                )
+        return context
 
     @staticmethod
     def _merge_candidate(

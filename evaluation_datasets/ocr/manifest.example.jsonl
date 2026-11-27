@@ -1,0 +1,3 @@
+{"id":"arabic-scan-1","image":"samples/arabic_scan_1.png","page_number":1,"language":"ara","kind":"scanned_pdf","ground_truth":"استبدل هذا النص بالنص العربي الصحيح بعد مراجعته","expected_tables":0}
+{"id":"english-scan-1","image":"samples/english_scan_1.png","page_number":1,"language":"eng","kind":"scanned_pdf","ground_truth":"Replace this with the verified English transcription.","expected_tables":0}
+{"id":"mixed-table-1","image":"samples/mixed_table_1.png","page_number":1,"language":"eng+ara","kind":"mixed_table","ground_truth":"استبدل هذا بالنص المختلط الصحيح Replace with verified mixed text","expected_tables":1}

@@ -1,0 +1,17 @@
+.git
+.venv
+.env
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+data/*
+!data/.gitkeep
+pdfs/*
+!pdfs/.gitkeep
+tmp
+logs
+documentary
+documentry
+evaluation_datasets/ocr/samples

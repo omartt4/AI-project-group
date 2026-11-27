@@ -14,7 +14,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from graph_rag.config import settings
 from graph_rag.ingestion.language import detect_language
-from graph_rag.ingestion.ocr import OCRProvider, TesseractOCRProvider
+from graph_rag.ingestion.ocr import OCRProvider, create_ocr_provider
 from graph_rag.ingestion.pdf_parser import PageContent, ParsedDocument
 
 
@@ -26,7 +26,7 @@ class PptxParser:
         ocr_provider: Optional[OCRProvider] = None,
         ocr_languages: Optional[str] = None,
     ) -> None:
-        self.ocr_provider = ocr_provider or TesseractOCRProvider()
+        self.ocr_provider = ocr_provider or create_ocr_provider()
         self.ocr_languages = ocr_languages or settings.OCR_LANGUAGES
 
     def parse(self, source: Union[str, Path, bytes], filename: str = "presentation.pptx") -> ParsedDocument:

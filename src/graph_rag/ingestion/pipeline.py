@@ -870,7 +870,8 @@ class IngestionPipeline:
         terminal_errors: List[Exception] = []
         attempted_errors: List[Exception] = []
 
-        for segment, result in zip(segments, batch_results):
+        normalized_results: List[GraphExtractionResult | Exception] = []
+        for result in batch_results:
             if isinstance(result, GraphExtractionResult):
                 truncated = any(
                     diagnostic.get("diagnostic_type")
@@ -878,7 +879,7 @@ class IngestionPipeline:
                     for diagnostic in result.diagnostics
                 )
                 if not truncated:
-                    successful_results.append(result)
+                    normalized_results.append(result)
                     continue
                 result = GraphExtractionError(
                     "Extraction output reached its token limit",
@@ -888,6 +889,41 @@ class IngestionPipeline:
                 result = RuntimeError(
                     "Extraction returned an unexpected segment result"
                 )
+            normalized_results.append(result)
+
+        batch_errors = [
+            result
+            for result in normalized_results
+            if isinstance(result, Exception)
+        ]
+        failure_ratio = len(batch_errors) / max(1, len(normalized_results))
+        if (
+            len(normalized_results) > 1
+            and failure_ratio > settings.EXTRACTION_BATCH_MAX_FAILURE_RATIO
+        ):
+            successful_results.extend(
+                result
+                for result in normalized_results
+                if isinstance(result, GraphExtractionResult)
+            )
+            terminal_errors.extend(batch_errors)
+            attempted_errors.extend(batch_errors)
+            logger.error(
+                "Graph extraction retry circuit opened: document_id=%s "
+                "retry_depth=%d failed=%d total=%d failure_ratio=%.2f limit=%.2f",
+                document_id,
+                retry_depth,
+                len(batch_errors),
+                len(normalized_results),
+                failure_ratio,
+                settings.EXTRACTION_BATCH_MAX_FAILURE_RATIO,
+            )
+            return successful_results, terminal_errors, attempted_errors
+
+        for segment, result in zip(segments, normalized_results):
+            if isinstance(result, GraphExtractionResult):
+                successful_results.append(result)
+                continue
             attempted_errors.append(result)
 
             retry_segments = [segment]
@@ -1070,6 +1106,10 @@ class IngestionPipeline:
                 raise ValueError(
                     "EXTRACTION_SEGMENT_RETRY_DEPTH cannot be negative"
                 )
+            if not 0 <= settings.EXTRACTION_BATCH_MAX_FAILURE_RATIO <= 1:
+                raise ValueError(
+                    "EXTRACTION_BATCH_MAX_FAILURE_RATIO must be between 0 and 1"
+                )
             # Very large prompts fit the model context but lose facts in the
             # middle. Cap extraction regions by characters first, then enforce
             # the provider token budget. Ordinary documents remain one request.
@@ -1213,7 +1253,7 @@ class IngestionPipeline:
         entities, diagnostics, _, id_map = EntityResolver(
             self.graph_db,
             self.vector_db,
-        ).resolve(normalized.entities)
+        ).resolve(normalized.entities, normalized.relations)
         normalized.entities = entities
         normalized.diagnostics.extend(diagnostics)
 
@@ -1410,6 +1450,9 @@ class IngestionPipeline:
             "output_tokens": str(settings.EXTRACTION_OUTPUT_TOKENS),
             "segment_max_characters": str(settings.EXTRACTION_SEGMENT_MAX_CHARS),
             "segment_retry_depth": str(settings.EXTRACTION_SEGMENT_RETRY_DEPTH),
+            "batch_max_failure_ratio": str(
+                settings.EXTRACTION_BATCH_MAX_FAILURE_RATIO
+            ),
             "minimum_confidence": str(settings.EXTRACTION_MIN_CONFIDENCE),
             "topic_min_confidence": str(settings.TOPIC_MIN_CONFIDENCE),
             "spacy_models": "|".join(

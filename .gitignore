@@ -16,6 +16,11 @@ wheels/
 data/
 *.db
 
+# Local OCR benchmark corpora/results (keep templates and documentation)
+evaluation_datasets/ocr/manifest.jsonl
+evaluation_datasets/ocr/samples/
+ocr_benchmark/
+
 # Local PDF corpus
 pdfs/
 

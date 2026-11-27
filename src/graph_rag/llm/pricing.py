@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-PRICING_VERSION = "2026-11-23"
+PRICING_VERSION = "2026-11-26"
 USD_PER_MILLION_TOKENS = Decimal("1000000")
 
 
@@ -45,6 +45,18 @@ MODEL_PRICING = {
         output_usd_per_million=Decimal("0"),
     ),
     "google/gemma-4-31b-it:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
+    "google/gemma-4-26b-a4b-it:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
+    "nvidia/nemotron-3.5-super-vl:free": ModelPricing(
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    ),
+    "nvidia/nemotron-3.5-embed-8b:free": ModelPricing(
         input_usd_per_million=Decimal("0"),
         output_usd_per_million=Decimal("0"),
     ),
