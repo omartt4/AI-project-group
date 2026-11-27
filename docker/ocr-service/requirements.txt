@@ -1,6 +1,9 @@
 fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 paddleocr[doc-parser]>=3.2,<4
-paddlepaddle>=3.1,<4
+# PaddlePaddle 3.3.x has a PIR/oneDNN CPU inference regression that raises
+# ConvertPirAttribute2RuntimeAttribute for PP-OCRv5. 3.2.2 keeps oneDNN enabled
+# and is the latest verified compatible runtime for this service.
+paddlepaddle==3.2.2
 pillow>=11,<14
 numpy>=1.26,<2.4

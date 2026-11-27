@@ -60,6 +60,8 @@ def test_query_classification() -> None:
         # C-3: "types of / kinds of / categories of" -> FACTUAL_LOOKUP
         ("what types of embeddings exist in modern NLP?", QueryClass.FACTUAL_LOOKUP),
         ("list the kinds of RAG architectures", QueryClass.FACTUAL_LOOKUP),
+        ("من هي ليلى حسن؟", QueryClass.FACTUAL_LOOKUP),
+        ("من هو مدير المشروع؟", QueryClass.FACTUAL_LOOKUP),
         # C-4: New SUMMARIZATION phrasings
         ("give an overview across all papers on retrieval methods", QueryClass.SUMMARIZATION),
         ("summarize the research on retrieval augmented generation", QueryClass.SUMMARIZATION),

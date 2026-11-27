@@ -40,6 +40,7 @@ from graph_rag.llm.model_client import (
     evaluation_model_client,
     extraction_model_client,
 )
+from graph_rag.llm.json_mode_adapter import repair_graph_payload
 
 
 class FakeModelClient:
@@ -324,6 +325,44 @@ def test_role_specific_model_routing() -> None:
     assert not embedding_model_client.llm_model
 
 
+def test_graph_json_property_shorthand_is_repaired_without_inventing_fields() -> None:
+    payload = {
+        "nodes": [
+            {
+                "id": "person-1",
+                "type": "Person",
+                "properties": [
+                    {"key": "name", "value": "Leila Hassan"},
+                    {"aliases": ["Leila", "ليلى"]},
+                ],
+            }
+        ],
+        "relationships": [
+            {
+                "source_node_id": "person-1",
+                "target_node_id": "org-1",
+                "properties": [
+                    {"description": "Leila works for Al Noor Energy."}
+                ],
+            }
+        ],
+    }
+
+    repaired = repair_graph_payload(payload)
+
+    assert repaired["nodes"][0]["properties"] == [
+        {"key": "name", "value": "Leila Hassan"},
+        {"key": "aliases", "value": '["Leila", "ليلى"]'},
+    ]
+    assert repaired["relationships"][0]["properties"] == [
+        {
+            "key": "description",
+            "value": "Leila works for Al Noor Energy.",
+        }
+    ]
+    assert "type" not in repaired["relationships"][0]
+
+
 def test_document_extraction_cache_reuses_ready_result() -> None:
     class CountingExtractor:
         calls = 0
@@ -536,7 +575,7 @@ def test_failed_model_response_is_cached_and_not_retried_implicitly() -> None:
         object.__setattr__(settings, "SQLITE_DB_PATH", original_db_path)
 
 
-def test_failed_segment_is_split_without_repeating_successful_segments() -> None:
+def test_majority_failed_segments_are_split_without_repeating_successful_segments() -> None:
     from graph_rag.graph.entity_extractor import GraphExtractionError
 
     class FakeExtractionChain:
@@ -549,7 +588,7 @@ def test_failed_segment_is_split_without_repeating_successful_segments() -> None
             for segment in segments:
                 source_refs = tuple(block.source_ref for block in segment.blocks)
                 self.source_ref_calls.append(source_refs)
-                if source_refs == ("bad",):
+                if source_refs in {("bad",), ("bad-2",)}:
                     results.append(
                         GraphExtractionError(
                             "mock malformed JSON",
@@ -587,23 +626,31 @@ def test_failed_segment_is_split_without_repeating_successful_segments() -> None
         language="en",
         blocks=[SourceBlock("bad", "paragraph", bad_text)],
     )
+    bad_two = StructuredDocumentInput(
+        document_id="retry-doc",
+        title="Retry document",
+        document_type="report",
+        language="en",
+        blocks=[SourceBlock("bad-2", "paragraph", bad_text)],
+    )
     chain = FakeExtractionChain()
     pipeline = object.__new__(IngestionPipeline)
 
     successes, terminal_errors, attempted_errors = (
         pipeline._extract_segments_with_retry(
             chain,
-            [good, bad],
+            [good, bad, bad_two],
             document_id="retry-doc",
             document_name="retry.pdf",
         )
     )
 
     assert not terminal_errors
-    assert len(attempted_errors) == 1
+    assert len(attempted_errors) == 2
     assert chain.source_ref_calls.count(("good",)) == 1
     assert chain.source_ref_calls.count(("bad",)) == 1
-    assert len(successes) > 2
+    assert chain.source_ref_calls.count(("bad-2",)) == 1
+    assert len(successes) > 4
     assert any(
         source_refs[0].startswith("bad:")
         for source_refs in chain.source_ref_calls
@@ -1496,7 +1543,7 @@ if __name__ == "__main__":
     test_document_extraction_cache_reuses_ready_result()
     test_extraction_cache_signature_tracks_language_and_context_settings()
     test_failed_model_response_is_cached_and_not_retried_implicitly()
-    test_failed_segment_is_split_without_repeating_successful_segments()
+    test_majority_failed_segments_are_split_without_repeating_successful_segments()
     test_retry_circuit_opens_when_most_of_a_batch_fails()
     test_incompatible_cache_requires_explicit_refresh_but_legacy_cache_is_readable()
     test_entity_resolver_uses_exact_candidates_and_rejects_ambiguity()

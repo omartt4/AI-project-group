@@ -897,9 +897,16 @@ class IngestionPipeline:
             if isinstance(result, Exception)
         ]
         failure_ratio = len(batch_errors) / max(1, len(normalized_results))
+        # On the initial batch, a partial success proves that extraction is not
+        # systemically broken. Preserve successful segments and give only the
+        # failed segments one split-and-retry opportunity. Keep the circuit
+        # breaker immediate when the entire initial batch fails, and restore
+        # the configured failure-ratio guard for recursive retries.
+        all_segments_failed = len(batch_errors) == len(normalized_results)
         if (
             len(normalized_results) > 1
             and failure_ratio > settings.EXTRACTION_BATCH_MAX_FAILURE_RATIO
+            and (retry_depth > 0 or all_segments_failed)
         ):
             successful_results.extend(
                 result

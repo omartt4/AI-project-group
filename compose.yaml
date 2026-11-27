@@ -17,12 +17,17 @@ services:
       OCR_ENGINE: ${OCR_ENGINE:-paddle}
       OCR_FALLBACK_ENGINE: ${OCR_FALLBACK_ENGINE:-tesseract}
       PADDLE_OCR_URL: http://ocr:8000
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
+      # Respect the target configured in .env. This can be either the local
+      # Compose service (bolt://neo4j:7687) or an Aura neo4j+s:// URI.
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
     ports:
       - "8501:8501"
     volumes:
+      # The application loads /app/.env itself. Mount the current host file so
+      # a stale copy baked into an older image can never override new Aura
+      # credentials. Keep it read-only inside the container.
+      - ./.env:/app/.env:ro
       - ./data:/app/data
       - ./pdfs:/app/pdfs
       - paddle-models:/root/.paddlex

@@ -1541,6 +1541,10 @@ class StructuredFileParserTests(unittest.TestCase):
             bound_options["max_tokens"],
             settings.EXTRACTION_OUTPUT_TOKENS,
         )
+        self.assertEqual(
+            bound_options["reasoning"],
+            {"enabled": settings.EXTRACTION_REASONING_ENABLED},
+        )
         self.assertEqual(result.entities[0].evidence, source_text[:-1])
         self.assertEqual(
             result.entities[0].provenance["source_offsets"],

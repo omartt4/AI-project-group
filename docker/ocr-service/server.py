@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 from functools import lru_cache
 from typing import Any
@@ -14,6 +15,7 @@ from PIL import Image
 
 
 app = FastAPI(title="GraphRAG PaddleOCR Service", version="1.0")
+logger = logging.getLogger(__name__)
 
 
 def _box(polygon: Any) -> dict[str, int]:
@@ -57,6 +59,17 @@ def _mapping(value: Any) -> dict[str, Any]:
     return payload.get("res", payload) if isinstance(payload.get("res"), dict) else payload
 
 
+def _items(value: Any) -> list[Any]:
+    """Convert PaddleOCR list-like output without truth-testing NumPy arrays."""
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -77,9 +90,12 @@ async def ocr(request: Request, language: str = "") -> dict[str, Any]:
         tables: list[dict[str, Any]] = []
         for result in results:
             payload = _mapping(result)
-            rec_texts = payload.get("rec_texts") or []
-            rec_scores = payload.get("rec_scores") or []
-            rec_boxes = payload.get("rec_polys") or payload.get("dt_polys") or []
+            rec_texts = _items(payload.get("rec_texts"))
+            rec_scores = _items(payload.get("rec_scores"))
+            raw_boxes = payload.get("rec_polys")
+            if raw_boxes is None:
+                raw_boxes = payload.get("dt_polys")
+            rec_boxes = _items(raw_boxes)
             for index, value in enumerate(rec_texts):
                 text = str(value).strip()
                 if not text:
@@ -97,12 +113,13 @@ async def ocr(request: Request, language: str = "") -> dict[str, Any]:
                 )
                 if score is not None:
                     scores.append(score)
-            table_rows = payload.get("table_res_list") or payload.get("tables") or []
-            if isinstance(table_rows, list):
-                tables.extend(
-                    value if isinstance(value, dict) else {"value": str(value)}
-                    for value in table_rows
-                )
+            raw_table_rows = payload.get("table_res_list")
+            if raw_table_rows is None:
+                raw_table_rows = payload.get("tables")
+            tables.extend(
+                value if isinstance(value, dict) else {"value": str(value)}
+                for value in _items(raw_table_rows)
+            )
         return {
             "text": "\n".join(texts),
             "bounding_boxes": boxes,
@@ -111,4 +128,5 @@ async def ocr(request: Request, language: str = "") -> dict[str, Any]:
             "metadata": {"engine": "paddleocr", "language": selected_language},
         }
     except Exception as exc:
+        logger.exception("PaddleOCR request failed for language=%s", selected_language)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

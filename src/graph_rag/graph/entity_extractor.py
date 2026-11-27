@@ -631,6 +631,10 @@ class EntityExtractor:
         if hasattr(chat_model, "bind"):
             chat_model = chat_model.bind(
                 max_tokens=settings.EXTRACTION_OUTPUT_TOKENS,
+                # Graph extraction needs complete, valid JSON. Thinking models can
+                # otherwise spend the entire output budget on hidden reasoning and
+                # truncate the JSON before its closing braces.
+                reasoning={"enabled": settings.EXTRACTION_REASONING_ENABLED},
             )
         transformer = LLMGraphTransformer(
             llm=JsonModeChatModel(chat_model),

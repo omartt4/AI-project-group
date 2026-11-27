@@ -106,8 +106,11 @@ class Settings:
     EXTRACTION_OUTPUT_TOKENS: int = int(
         os.getenv("EXTRACTION_OUTPUT_TOKENS", "8192")
     )
+    EXTRACTION_REASONING_ENABLED: bool = os.getenv(
+        "EXTRACTION_REASONING_ENABLED", "false"
+    ).strip().lower() in ("true", "1", "yes", "on")
     EXTRACTION_SEGMENT_MAX_CHARS: int = int(
-        os.getenv("EXTRACTION_SEGMENT_MAX_CHARS", "40000")
+        os.getenv("EXTRACTION_SEGMENT_MAX_CHARS", "20000")
     )
     EXTRACTION_SEGMENT_RETRY_DEPTH: int = int(
         os.getenv("EXTRACTION_SEGMENT_RETRY_DEPTH", "2")

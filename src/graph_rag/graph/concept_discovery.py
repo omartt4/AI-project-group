@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from graph_rag.graph.graph_builder import graph_builder
+from graph_rag.graph.entity_resolution import normalize_entity_name
 
 logger = logging.getLogger(__name__)
 
@@ -144,13 +145,17 @@ class ConceptDiscoveryEngine:
         """Find matching entities and traverse their connected neighbors."""
         entities: List[DiscoveredConcept] = []
         relationships: List[Dict[str, Any]] = []
+        normalized_keyword = normalize_entity_name(keyword)
 
         # Find matching entities and their 1-hop / 2-hop neighbors
         query = """
         MATCH (e:Entity)
         WHERE e.dataset_id = $dataset_id
           AND (
-              toLower(e.name) CONTAINS toLower($kw)
+              e.normalized_name CONTAINS $normalized_kw
+              OR any(alias IN coalesce(e.normalized_aliases, [])
+                     WHERE alias CONTAINS $normalized_kw)
+              OR toLower(e.name) CONTAINS toLower($kw)
               OR any(alias IN coalesce(e.aliases, [])
                      WHERE toLower(alias) CONTAINS toLower($kw))
           )
@@ -172,6 +177,7 @@ class ConceptDiscoveryEngine:
         records = session.run(
             query,
             kw=keyword,
+            normalized_kw=normalized_keyword,
             limit=limit,
             dataset_id=self.builder.dataset_id,
         )

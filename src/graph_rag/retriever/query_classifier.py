@@ -89,7 +89,7 @@ class QueryClassifier:
         r"\bwhat\s+are\s+(?!the\s+(?:modern|current|main|key|best|latest|common|various|different|major|top|primary|leading|popular|existing|available|typical|recent|important|significant|general|basic|advanced|new|emerging))\b",
         # C-3: Enumeration/category questions treated as factual
         r"\b(?:types?\s+of|kinds?\s+of|categories?\s+of|forms?\s+of|variants?\s+of)\b",
-        r"(?:ما\s+هو|ما\s+هي|ما\s+معنى|تعريف|متى|أين)",
+        r"(?:ما\s+هو|ما\s+هي|من\s+هو|من\s+هي|ما\s+معنى|تعريف|متى|أين)",
     ]
 
     CONVERSATIONAL_PATTERNS = [
