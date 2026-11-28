@@ -94,6 +94,28 @@ html, body, [class*="css"] {
     border: 1px solid #115e59;
 }
 
+.badge-warning {
+    background: #451a03;
+    color: #fbbf24;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    display: inline-block;
+    border: 1px solid #92400e;
+}
+
+.badge-info {
+    background: #1e3a8a;
+    color: #93c5fd;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    display: inline-block;
+    border: 1px solid #1e40af;
+}
+
 .badge-source-initial {
     background: #1e293b;
     color: #94a3b8;

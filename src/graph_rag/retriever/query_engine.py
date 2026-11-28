@@ -21,8 +21,63 @@ from graph_rag.evaluation.latency_tracker import LatencyMetrics, StageTimer
 from graph_rag.llm.model_client import chat_model_client, model_request_context
 from graph_rag.retriever.hybrid_retriever import hybrid_retriever
 from graph_rag.retriever.query_classifier import QueryClassification, QueryClass
+from graph_rag.retriever.language_detector import language_detector
 
 logger = logging.getLogger(__name__)
+
+# Evidence quality thresholds
+MIN_CHUNKS_THRESHOLD = 2
+MIN_CONTEXT_LENGTH = 100
+MIN_SIMILARITY_SCORE = 0.3
+
+
+def assess_evidence_quality(
+    chunks: List[Dict[str, Any]],
+    context_text: str,
+    classification: Optional[QueryClassification],
+) -> tuple[bool, float]:
+    """
+    Assess whether retrieved evidence is sufficient for answering the question.
+
+    Returns:
+        (is_insufficient, quality_score): quality_score ranges 0.0-1.0
+    """
+    if not chunks:
+        return True, 0.0
+
+    # Check chunk count
+    chunk_count = len(chunks)
+    chunk_score = min(chunk_count / MIN_CHUNKS_THRESHOLD, 1.0)
+
+    # Check context length
+    context_length = len(context_text.strip())
+    context_score = min(context_length / MIN_CONTEXT_LENGTH, 1.0)
+
+    # Check average similarity score. Keep the original 0..1 score instead of
+    # saturating every score above the minimum threshold to 1.0.
+    similarity_scores = [c.get("similarity_score", 0.0) for c in chunks]
+    avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
+    similarity_score = max(0.0, min(float(avg_similarity), 1.0))
+
+    # Similarity is the primary signal, moderated by the amount of supporting
+    # evidence. This keeps low-relevance passages low even when they are long.
+    support_score = (chunk_score + context_score) / 2
+    quality_score = similarity_score * (0.5 + 0.5 * support_score)
+
+    # Factual answers require stronger evidence than exploratory synthesis.
+    quality_threshold = (
+        0.65
+        if classification and classification.query_class == QueryClass.FACTUAL_LOOKUP
+        else 0.40
+    )
+    is_insufficient = (
+        quality_score < quality_threshold
+        or context_length < MIN_CONTEXT_LENGTH
+        or similarity_score < MIN_SIMILARITY_SCORE
+    )
+
+    return is_insufficient, round(quality_score, 2)
+
 
 # Specialized system prompts per query class
 SYSTEM_PROMPTS = {
@@ -56,6 +111,23 @@ Respond helpfully, politely, and concisely. If the user asks what you can do, br
 }
 
 LANGUAGE_INSTRUCTION = """Answer in the same language as the user's question unless they explicitly request another language. For mixed-language questions, use the predominant language while preserving technical terms, proper names, and citations as appropriate."""
+
+INSUFFICIENT_EVIDENCE_PROMPT = """You are a helpful scientific AI research assistant.
+The user asked a question, but the retrieved research context is insufficient or irrelevant to provide a reliable answer.
+
+User Question:
+{question}
+
+Available Context (limited/irrelevant):
+{context}
+
+Guidelines:
+1. Acknowledge that the available research documents do not contain sufficient information to answer this question confidently.
+2. If possible, suggest what information would be needed or related topics that might be covered in the literature.
+3. Be honest about the limitation rather than speculating or hallucinating.
+4. Keep the response concise and helpful.
+
+Response:"""
 
 
 def build_prompts(
@@ -97,6 +169,9 @@ class QueryEngineResponse:
     discovered_concepts_count: int = 0
     unique_papers_count: int = 0
     concept_summary: str = ""
+    insufficient_evidence: bool = False
+    evidence_quality_score: float = 1.0
+    detected_language: str = "en"
 
 
 class QueryEngine:
@@ -131,14 +206,37 @@ class QueryEngine:
         qc = retrieval_res.classification
         concept_summary = retrieval_res.evidence.concept_summary if retrieval_res.evidence else ""
 
+        # Assess evidence quality
+        insufficient_evidence, evidence_quality = assess_evidence_quality(
+            chunks=retrieval_res.chunks,
+            context_text=context_text,
+            classification=qc,
+        )
+
         logger.info(
-            "Adaptive Retrieval completed: intent=%s, chunks=%d, unique_papers=%d, concepts=%d, relations=%d, latency_ms=%d",
+            "Adaptive Retrieval completed: intent=%s, chunks=%d, unique_papers=%d, concepts=%d, relations=%d, latency_ms=%d, evidence_quality=%.2f, insufficient=%s",
             qc.query_class.value if qc else "UNKNOWN",
             len(retrieval_res.chunks),
             retrieval_res.unique_papers_count,
             len(retrieval_res.discovered_concepts),
             len(retrieval_res.graph_facts),
             latency.retrieval_ms,
+            evidence_quality,
+            insufficient_evidence,
+        )
+
+        if len(retrieval_res.discovered_concepts) == 0:
+            logger.warning("Zero graph results returned - Neo4j may be offline or no matching entities found")
+
+        # Detect query language for multilingual support
+        lang_detection = language_detector.detect(question)
+        lang_instruction = language_detector.get_response_language_instruction(lang_detection, question)
+        
+        logger.info(
+            "Language detection: language=%s, confidence=%.2f, script=%s",
+            lang_detection.language,
+            lang_detection.confidence,
+            lang_detection.detected_script,
         )
 
         # Stage 2: Intent-Specific LLM Generation
@@ -147,6 +245,18 @@ class QueryEngine:
             context_text=context_text,
             classification=qc,
         )
+
+        # Add language instruction to system prompt
+        sys_prompt = f"{sys_prompt}\n\n{lang_instruction}"
+
+        # Use insufficient evidence prompt if evidence quality is low
+        if insufficient_evidence and qc and qc.query_class != QueryClass.CONVERSATIONAL:
+            user_prompt = INSUFFICIENT_EVIDENCE_PROMPT.format(
+                question=question,
+                context=context_text[:500] if context_text else "No relevant context found."
+            )
+            sys_prompt = f"You are a helpful and honest scientific AI research assistant.\n\n{lang_instruction}"
+            logger.warning(f"Insufficient evidence detected (quality={evidence_quality:.2f}), using fallback prompt")
 
         with StageTimer() as gen_timer:
             generation_succeeded = True
@@ -189,6 +299,7 @@ class QueryEngine:
                         session_id=session_id,
                         user_id=user_id,
                         latency=latency,
+                        detected_language=lang_detection.language,
                     )
             except Exception as e:
                 logger.warning(f"Evaluation failed: {e}")
@@ -224,6 +335,9 @@ class QueryEngine:
             discovered_concepts_count=len(retrieval_res.discovered_concepts),
             unique_papers_count=retrieval_res.unique_papers_count,
             concept_summary=concept_summary,
+            insufficient_evidence=insufficient_evidence,
+            evidence_quality_score=evidence_quality,
+            detected_language=lang_detection.language,
         )
 
 

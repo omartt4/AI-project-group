@@ -35,6 +35,7 @@ from graph_rag.retriever.query_classifier import (
     QueryClass,
     query_classifier,
 )
+from graph_rag.retriever.llm_query_classifier import llm_query_classifier
 
 logger = logging.getLogger(__name__)
 
